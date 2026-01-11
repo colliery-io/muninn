@@ -1,0 +1,30 @@
+[package]
+name = "muninn"
+description = "Privacy-first recursive context gateway for agentic coding"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+muninn-graph.workspace = true
+muninn-rlm.workspace = true
+muninn-tracing.workspace = true
+tokio.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml = "0.8"
+async-trait = "0.1"
+futures = "0.3"
+regex = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.0", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,41 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/muninn",
+    "crates/muninn-graph",
+    "crates/muninn-rlm",
+    "crates/muninn-tracing",
+    "crates/tests",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.85"
+repository = "https://github.com/colliery-io/muninn"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Internal crates
+muninn-graph = { path = "crates/muninn-graph" }
+muninn-rlm = { path = "crates/muninn-rlm" }
+muninn-tracing = { path = "crates/muninn-tracing" }

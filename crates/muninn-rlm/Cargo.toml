@@ -1,0 +1,66 @@
+[package]
+name = "muninn-rlm"
+description = "RLM gateway and tool environment"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Async
+tokio.workspace = true
+async-trait = "0.1"
+futures = "0.3"
+
+# HTTP
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+axum = { version = "0.8", features = ["http2"] }
+axum-extra = { version = "0.10", features = ["typed-header"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+hyper = { version = "1", features = ["full"] }
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Utilities
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+bytes = "1"
+pin-project-lite = "0.2"
+regex = "1"
+
+# OAuth/Crypto
+rand = "0.9"
+base64 = "0.22"
+sha2 = "0.10"
+urlencoding = "2"
+
+# Graph
+muninn-graph = { path = "../muninn-graph" }
+
+# Tracing
+muninn-tracing = { path = "../muninn-tracing" }
+graphqlite = "0.3"
+
+# MCP
+rust-mcp-sdk = { version = "0.8.0", default-features = false, features = [
+    "server",
+    "macros",
+    "stdio",
+] }
+schemars = "0.8"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3.10"
+serial_test = "3"
+muninn-graph = { path = "../muninn-graph" }

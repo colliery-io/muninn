@@ -1,0 +1,29 @@
+[package]
+name = "muninn-tracing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Generic agentic tracing infrastructure - task-local collection and JSONL persistence"
+
+[dependencies]
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Async runtime for task-local storage
+tokio = { version = "1.0", features = ["rt", "sync"] }
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID generation for trace IDs
+uuid = { version = "1.0", features = ["v4"] }
+
+# Error handling
+thiserror = "1.0"
+
+[dev-dependencies]
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros"] }
+tempfile = "3.10"

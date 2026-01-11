@@ -1,0 +1,33 @@
+[package]
+name = "muninn-graph"
+description = "Code graph infrastructure - parsing, symbols, and storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+
+# Tree-sitter parsing
+tree-sitter = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-python = "0.23"
+tree-sitter-c = "0.23"
+tree-sitter-cpp = "0.23"
+streaming-iterator = "0.1"
+
+# Graph storage
+graphqlite = { version = "0.3", features = ["bundled-extension"] }
+
+# File watching
+notify = "6"
+notify-debouncer-mini = "0.4"
+ignore = "0.4"
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile = "3.10"
+serial_test = "3"
