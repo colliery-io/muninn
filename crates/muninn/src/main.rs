@@ -40,6 +40,11 @@ fn split_args_at_agent() -> (Vec<String>, Option<(String, Vec<String>)>) {
 }
 
 use config::Config;
+use muninn_graph::doc_store::{DocStore, Ecosystem};
+use muninn_graph::registry::{
+    PyDocIndexer, PyIndexerConfig, RustDocIndexer, IndexerConfig,
+    LlmsTxtIndexer, LlmsTxtIndexerConfig,
+};
 use muninn_graph::{FileEvent, FileWatcher, GraphBuilder, GraphStore};
 use muninn_rlm::{
     AnthropicBackend, AnthropicConfig, BudgetConfig as RlmBudgetConfig, FileTokenManager,
@@ -183,6 +188,129 @@ enum Commands {
         /// Delete stored OAuth tokens
         #[arg(long)]
         logout: bool,
+    },
+
+    /// Manage library documentation index
+    Docs {
+        #[command(subcommand)]
+        command: DocsCommand,
+    },
+}
+
+/// Subcommands for documentation management.
+#[derive(Subcommand)]
+enum DocsCommand {
+    /// Index a Rust crate from crates.io
+    #[command(name = "index-crate")]
+    IndexCrate {
+        /// Name of the crate to index (e.g., 'tokio', 'serde')
+        name: String,
+
+        /// Specific version to index (default: latest)
+        #[arg(long)]
+        version: Option<String>,
+
+        /// Path to the doc store database (default: .muninn/docs.db)
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
+
+    /// Index a Python package from PyPI
+    #[command(name = "index-package")]
+    IndexPackage {
+        /// Name of the package to index (e.g., 'requests', 'flask')
+        name: String,
+
+        /// Specific version to index (default: latest)
+        #[arg(long)]
+        version: Option<String>,
+
+        /// Path to the doc store database (default: .muninn/docs.db)
+        #[arg(long)]
+        db: Option<PathBuf>,
+
+        /// Python executable (deprecated, no longer needed - tree-sitter is used)
+        #[arg(long, default_value = "python3", hide = true)]
+        python: String,
+    },
+
+    /// List all indexed libraries
+    List {
+        /// Filter by ecosystem (rust, python)
+        #[arg(short, long)]
+        ecosystem: Option<String>,
+
+        /// Path to the doc store database (default: .muninn/docs.db)
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
+
+    /// Search documentation in indexed libraries
+    Search {
+        /// Library name to search (e.g., 'tokio', 'requests')
+        library: String,
+
+        /// Search query (e.g., 'spawn async task', 'HTTP request')
+        query: String,
+
+        /// Maximum results to return
+        #[arg(short = 'n', long, default_value = "20")]
+        limit: usize,
+
+        /// Path to the doc store database (default: .muninn/docs.db)
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
+
+    /// Remove an indexed library
+    Remove {
+        /// Name of the library to remove
+        name: String,
+
+        /// Path to the doc store database (default: .muninn/docs.db)
+        #[arg(long)]
+        db: Option<PathBuf>,
+
+        /// Skip confirmation prompt
+        #[arg(short, long)]
+        force: bool,
+    },
+
+    /// Update (re-index) an existing library to a new version
+    Update {
+        /// Name of the library to update
+        name: String,
+
+        /// Specific version to update to (default: latest)
+        #[arg(long)]
+        version: Option<String>,
+
+        /// Path to the doc store database (default: .muninn/docs.db)
+        #[arg(long)]
+        db: Option<PathBuf>,
+
+        /// Python executable (deprecated, no longer needed - tree-sitter is used)
+        #[arg(long, default_value = "python3", hide = true)]
+        python: String,
+    },
+
+    /// Index documentation from an llms.txt URL (fast-path for LLM-optimized docs)
+    #[command(name = "index-llms")]
+    IndexLlms {
+        /// URL to fetch llms.txt from (can be base URL or direct llms.txt URL)
+        url: String,
+
+        /// Path to the doc store database (default: .muninn/docs.db)
+        #[arg(long)]
+        db: Option<PathBuf>,
+
+        /// Fast mode: only index descriptions, don't fetch linked content
+        #[arg(long)]
+        fast: bool,
+
+        /// Maximum number of links to fetch (0 = unlimited)
+        #[arg(long, default_value = "100")]
+        max_links: usize,
     },
 }
 
@@ -889,6 +1017,413 @@ max_duration_secs = 300
 
             // Run OAuth flow
             run_oauth_flow(&token_manager).await?;
+        }
+
+        Commands::Docs { command } => {
+            // Initialize logging for CLI commands
+            init_logging(cli.verbose);
+
+            // Resolve docs database path
+            let resolve_db_path = |db: Option<PathBuf>| -> PathBuf {
+                db.unwrap_or_else(|| {
+                    config_dir
+                        .as_ref()
+                        .map(|d| d.join("docs.db"))
+                        .unwrap_or_else(|| PathBuf::from(".muninn/docs.db"))
+                })
+            };
+
+            match command {
+                DocsCommand::IndexCrate { name, version, db } => {
+                    let db_path = resolve_db_path(db);
+
+                    // Create parent directory if needed
+                    if let Some(parent) = db_path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+
+                    info!("Opening doc store at {}", db_path.display());
+
+                    info!(
+                        "Indexing crate '{}' {}...",
+                        name,
+                        version.as_deref().unwrap_or("(latest)")
+                    );
+
+                    // Run in blocking task to avoid tokio runtime conflicts with reqwest::blocking
+                    let result = tokio::task::spawn_blocking(move || {
+                        let store = DocStore::open(&db_path)?;
+                        let config = IndexerConfig {
+                            keep_source: false,
+                            work_dir: None,
+                            rustdoc_flags: Vec::new(),
+                        };
+                        let indexer = RustDocIndexer::with_config(config);
+                        indexer.index_crate(&store, &name, version.as_deref())
+                    })
+                    .await??;
+
+                    info!(
+                        "Successfully indexed {} v{}",
+                        result.crate_name, result.version
+                    );
+                    info!(
+                        "  {} items extracted, {} items indexed",
+                        result.items_extracted, result.items_indexed
+                    );
+                }
+
+                DocsCommand::IndexPackage {
+                    name,
+                    version,
+                    db,
+                    python,
+                } => {
+                    let db_path = resolve_db_path(db);
+
+                    // Create parent directory if needed
+                    if let Some(parent) = db_path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+
+                    info!("Opening doc store at {}", db_path.display());
+
+                    info!(
+                        "Indexing package '{}' {}...",
+                        name,
+                        version.as_deref().unwrap_or("(latest)")
+                    );
+
+                    // Clone name for error message since it's moved into closure
+                    let name_for_error = name.clone();
+
+                    // Run in blocking task to avoid tokio runtime conflicts with reqwest::blocking
+                    // Note: `python` argument is ignored - tree-sitter is used for extraction
+                    let _ = python; // Silence unused variable warning
+                    let result = tokio::task::spawn_blocking(move || {
+                        let store = DocStore::open(&db_path)?;
+                        let config = PyIndexerConfig {
+                            keep_source: false,
+                            work_dir: None,
+                            ..Default::default()
+                        };
+                        let indexer = PyDocIndexer::with_config(config);
+                        indexer.index_package(&store, &name, version.as_deref())
+                    })
+                    .await?;
+
+                    match result {
+                        Ok(stats) => {
+                            info!(
+                                "Successfully indexed {} v{}",
+                                stats.package_name, stats.version
+                            );
+                            info!(
+                                "  {} items extracted, {} items indexed",
+                                stats.items_extracted, stats.items_indexed
+                            );
+                        }
+                        Err(e) => {
+                            anyhow::bail!("Failed to index package '{}': {}", name_for_error, e);
+                        }
+                    }
+                }
+
+                DocsCommand::List { ecosystem, db } => {
+                    let db_path = resolve_db_path(db);
+
+                    if !db_path.exists() {
+                        info!("No doc store found at {}", db_path.display());
+                        info!("Use 'muninn docs index-crate' or 'muninn docs index-package' to index libraries.");
+                        return Ok(());
+                    }
+
+                    let store = DocStore::open(&db_path)?;
+                    let libraries = store.list_libraries()?;
+
+                    // Filter by ecosystem if specified
+                    let ecosystem_filter = ecosystem.as_ref().and_then(|e| Ecosystem::from_str(e));
+                    let filtered: Vec<_> = libraries
+                        .into_iter()
+                        .filter(|lib| {
+                            ecosystem_filter
+                                .map(|eco| lib.ecosystem == eco)
+                                .unwrap_or(true)
+                        })
+                        .collect();
+
+                    if filtered.is_empty() {
+                        if let Some(eco) = ecosystem_filter {
+                            info!("No {} libraries indexed.", eco.as_str());
+                        } else {
+                            info!("No libraries indexed.");
+                            info!("Use 'muninn docs index-crate' or 'muninn docs index-package' to index libraries.");
+                        }
+                        return Ok(());
+                    }
+
+                    println!("{:<20} {:<10} {:<10} {}", "LIBRARY", "VERSION", "ECOSYSTEM", "INDEXED AT");
+                    println!("{}", "-".repeat(60));
+                    for lib in &filtered {
+                        println!(
+                            "{:<20} {:<10} {:<10} {}",
+                            lib.library, lib.version, lib.ecosystem.as_str(), lib.indexed_at
+                        );
+                    }
+                    println!();
+                    info!("{} libraries indexed", filtered.len());
+                }
+
+                DocsCommand::Search {
+                    library,
+                    query,
+                    limit,
+                    db,
+                } => {
+                    let db_path = resolve_db_path(db);
+
+                    if !db_path.exists() {
+                        anyhow::bail!(
+                            "No doc store found at {}. Use 'muninn docs index-crate' or 'muninn docs index-package' first.",
+                            db_path.display()
+                        );
+                    }
+
+                    let store = DocStore::open(&db_path)?;
+
+                    // Check if library exists
+                    let lib = store.get_library(&library)?;
+                    if lib.is_none() {
+                        anyhow::bail!(
+                            "Library '{}' is not indexed. Use 'muninn docs index-crate' or 'muninn docs index-package' first.",
+                            library
+                        );
+                    }
+
+                    let lib_info = lib.unwrap();
+                    info!(
+                        "Searching '{}' in {} v{} ({})...",
+                        query, library, lib_info.version, lib_info.ecosystem.as_str()
+                    );
+
+                    let results = store.search(&library, &query, limit)?;
+
+                    if results.is_empty() {
+                        info!("No results found for '{}'", query);
+                        return Ok(());
+                    }
+
+                    println!();
+                    for (i, result) in results.iter().enumerate() {
+                        println!("{}. {} ({})", i + 1, result.chunk.item_path, result.chunk.item_type.as_str());
+                        if let Some(ref sig) = result.chunk.signature {
+                            println!("   {}", sig);
+                        }
+                        // Truncate doc text for display
+                        let doc = &result.chunk.doc_text;
+                        let doc_preview = if doc.len() > 200 {
+                            format!("{}...", &doc[..200])
+                        } else {
+                            doc.clone()
+                        };
+                        // Indent and wrap doc text
+                        for line in doc_preview.lines().take(4) {
+                            println!("   {}", line);
+                        }
+                        println!();
+                    }
+                    info!("Found {} results", results.len());
+                }
+
+                DocsCommand::Remove { name, db, force } => {
+                    let db_path = resolve_db_path(db);
+
+                    if !db_path.exists() {
+                        anyhow::bail!(
+                            "No doc store found at {}.",
+                            db_path.display()
+                        );
+                    }
+
+                    let store = DocStore::open(&db_path)?;
+
+                    // Check if library exists
+                    let lib = store.get_library(&name)?;
+                    if lib.is_none() {
+                        anyhow::bail!("Library '{}' is not indexed.", name);
+                    }
+
+                    let lib_info = lib.unwrap();
+
+                    // Confirm unless --force
+                    if !force {
+                        use std::io::{self, Write};
+                        print!(
+                            "Remove {} v{} ({})? [y/N] ",
+                            lib_info.library, lib_info.version, lib_info.ecosystem.as_str()
+                        );
+                        io::stdout().flush()?;
+
+                        let mut input = String::new();
+                        io::stdin().read_line(&mut input)?;
+                        let input = input.trim().to_lowercase();
+
+                        if input != "y" && input != "yes" {
+                            info!("Aborted.");
+                            return Ok(());
+                        }
+                    }
+
+                    if store.delete_library(&name)? {
+                        info!(
+                            "Removed {} v{} ({})",
+                            lib_info.library, lib_info.version, lib_info.ecosystem.as_str()
+                        );
+                    } else {
+                        anyhow::bail!("Failed to remove library '{}'", name);
+                    }
+                }
+
+                DocsCommand::Update {
+                    name,
+                    version,
+                    db,
+                    python,
+                } => {
+                    // Note: `python` argument is ignored - tree-sitter is used for extraction
+                    let _ = python;
+                    let db_path = resolve_db_path(db);
+
+                    if !db_path.exists() {
+                        anyhow::bail!(
+                            "No doc store found at {}. Use 'muninn docs index-crate' or 'muninn docs index-package' first.",
+                            db_path.display()
+                        );
+                    }
+
+                    // First check library info (quick, no HTTP)
+                    let (ecosystem, old_version) = {
+                        let store = DocStore::open(&db_path)?;
+                        let lib = store.get_library(&name)?;
+                        if lib.is_none() {
+                            anyhow::bail!(
+                                "Library '{}' is not indexed. Use 'muninn docs index-crate' or 'muninn docs index-package' to index it first.",
+                                name
+                            );
+                        }
+                        let lib_info = lib.unwrap();
+                        (lib_info.ecosystem, lib_info.version.clone())
+                    };
+
+                    if ecosystem == Ecosystem::Web {
+                        anyhow::bail!(
+                            "Cannot update web documentation '{}'. Use 'muninn docs index-llms' to re-index.",
+                            name
+                        );
+                    }
+
+                    info!(
+                        "Updating {} from v{} to {}...",
+                        name,
+                        old_version,
+                        version.as_deref().unwrap_or("latest")
+                    );
+
+                    // Run indexing in blocking task to avoid tokio runtime conflicts
+                    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<(String, String, usize, usize)> {
+                        let store = DocStore::open(&db_path)?;
+
+                        // Delete the old entry
+                        store.delete_library(&name)?;
+
+                        // Re-index based on ecosystem
+                        match ecosystem {
+                            Ecosystem::Rust => {
+                                let config = IndexerConfig {
+                                    keep_source: false,
+                                    work_dir: None,
+                                    rustdoc_flags: Vec::new(),
+                                };
+                                let indexer = RustDocIndexer::with_config(config);
+                                let stats = indexer.index_crate(&store, &name, version.as_deref())?;
+                                Ok((stats.crate_name, stats.version, stats.items_extracted, stats.items_indexed))
+                            }
+                            Ecosystem::Python => {
+                                let config = PyIndexerConfig {
+                                    keep_source: false,
+                                    work_dir: None,
+                                    ..Default::default()
+                                };
+                                let indexer = PyDocIndexer::with_config(config);
+                                let stats = indexer.index_package(&store, &name, version.as_deref())?;
+                                Ok((stats.package_name, stats.version, stats.items_extracted, stats.items_indexed))
+                            }
+                            Ecosystem::Web => {
+                                unreachable!("Web ecosystem handled above")
+                            }
+                        }
+                    })
+                    .await??;
+
+                    info!(
+                        "Updated {} from v{} to v{}",
+                        result.0, old_version, result.1
+                    );
+                    info!(
+                        "  {} items extracted, {} items indexed",
+                        result.2, result.3
+                    );
+                }
+
+                DocsCommand::IndexLlms {
+                    url,
+                    db,
+                    fast,
+                    max_links,
+                } => {
+                    let db_path = resolve_db_path(db);
+
+                    // Create parent directory if needed
+                    if let Some(parent) = db_path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+
+                    info!("Opening doc store at {}", db_path.display());
+
+                    let fast_mode = fast;
+                    info!(
+                        "Indexing llms.txt from {} {}...",
+                        url,
+                        if fast_mode { "(fast mode)" } else { "" }
+                    );
+
+                    // Run in blocking task to avoid tokio runtime conflicts with reqwest::blocking
+                    let result = tokio::task::spawn_blocking(move || {
+                        let store = DocStore::open(&db_path)?;
+                        let config = LlmsTxtIndexerConfig {
+                            fetch_linked_content: !fast,
+                            max_links,
+                            ..Default::default()
+                        };
+                        let indexer = LlmsTxtIndexer::with_config(config);
+                        indexer.index_url(&store, &url)
+                    })
+                    .await?;
+
+                    match result {
+                        Ok(stats) => {
+                            info!("Successfully indexed '{}'", stats.name);
+                            info!(
+                                "  {} links found, {} indexed, {} failed",
+                                stats.links_found, stats.links_indexed, stats.links_failed
+                            );
+                        }
+                        Err(e) => {
+                            anyhow::bail!("Failed to index llms.txt: {}", e);
+                        }
+                    }
+                }
+            }
         }
     }
 

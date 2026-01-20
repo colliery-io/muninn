@@ -5,16 +5,23 @@
 //! - Graph storage and querying
 //! - Graph building from source files
 //! - File watching for incremental updates
+//! - Registry clients for fetching package metadata and source
 
 pub mod builder;
+pub mod doc_store;
 pub mod edges;
 pub mod lang;
 pub mod parser;
+pub mod registry;
 pub mod store;
 pub mod symbols;
 pub mod watcher;
 
 pub use builder::{BuildError, BuildStats, GraphBuilder};
+pub use doc_store::{
+    DocChunk, DocChunkInput, DocLibrary, DocStore, DocStoreError, Ecosystem, ItemType,
+    ScoredChunk, SearchMode,
+};
 pub use edges::{CallType, Edge, EdgeKind};
 pub use lang::python::PythonExtractor;
 pub use lang::rust::{Call, FFIMarker, Import, RustExtractor};

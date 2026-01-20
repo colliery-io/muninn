@@ -10,6 +10,7 @@
 pub mod anthropic;
 pub mod backend;
 pub mod context;
+pub mod doc_tools;
 pub mod engine;
 pub mod error;
 pub mod fs;
@@ -42,6 +43,10 @@ pub use backend::{
 pub use context::{ContextAggregator, ContextBuilder, ContextItem};
 pub use engine::{EngineConfig, EngineDeps, ExplorationContext, RecursiveEngine};
 pub use error::{BudgetExceededError, BudgetType, Result, RlmError};
+pub use doc_tools::{
+    IndexCrateTool, IndexPackageTool, ListLibrariesTool, SearchDocsTool, SharedDocStore,
+    create_doc_tools, wrap_doc_store,
+};
 pub use fs::{
     DirEntry, FileMetadata, FileSystem, MockFileSystem, RealFileSystem, SharedFileSystem,
 };
