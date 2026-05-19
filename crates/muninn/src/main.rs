@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use tracing::info;
+use tracing::{debug, info};
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
@@ -42,16 +42,17 @@ fn split_args_at_agent() -> (Vec<String>, Option<(String, Vec<String>)>) {
 use config::Config;
 use muninn_graph::doc_store::{DocStore, Ecosystem};
 use muninn_graph::registry::{
-    PyDocIndexer, PyIndexerConfig, RustDocIndexer, IndexerConfig,
-    LlmsTxtIndexer, LlmsTxtIndexerConfig,
+    IndexerConfig, LlmsTxtIndexer, LlmsTxtIndexerConfig, PyDocIndexer, PyIndexerConfig,
+    RustDocIndexer,
 };
 use muninn_graph::{FileEvent, FileWatcher, GraphBuilder, GraphStore};
 use muninn_rlm::{
     AnthropicBackend, AnthropicConfig, BudgetConfig as RlmBudgetConfig, FileTokenManager,
     GroqBackend, GroqConfig, OAuthConfig, OllamaBackend, OllamaConfig, PkceChallenge, ProxyConfig,
-    ProxyServer, RouterConfig, RouterStrategy, SharedGraphStore, TokenManager, ToolRegistry,
-    build_authorization_url, create_fs_tools, create_graph_tools, create_token_manager,
-    exchange_code_for_tokens, generate_state, parse_code_state, wrap_store,
+    ProxyServer, RouterConfig, RouterStrategy, SharedDocStore, SharedGraphStore, TokenManager,
+    ToolRegistry, build_authorization_url, create_doc_tools, create_fs_tools, create_graph_tools,
+    create_token_manager, exchange_code_for_tokens, generate_state, parse_code_state,
+    wrap_doc_store, wrap_store,
 };
 
 /// Convert config budget to RLM budget type.
@@ -102,7 +103,22 @@ fn create_backend_from_config(
             }
         }
         "ollama" => {
-            let ollama_config = OllamaConfig::new().with_model(model);
+            // Resolve base_url + api_key from [ollama] (with env var fallback
+            // for the key). Local Ollama works keyless; Ollama Cloud requires
+            // OLLAMA_API_KEY and is the new default base_url.
+            let base_url = config.ollama.resolved_base_url().to_string();
+            let api_key = config.ollama.resolved_api_key();
+            if config.ollama.needs_api_key() && api_key.is_none() {
+                // The validator already surfaces this, but guard the factory
+                // too so we never silently hit cloud without credentials.
+                return Ok(None);
+            }
+            let mut ollama_config = OllamaConfig::new()
+                .with_base_url(base_url)
+                .with_model(model);
+            if let Some(k) = api_key {
+                ollama_config = ollama_config.with_api_key(k);
+            }
             Ok(Some(Arc::new(OllamaBackend::new(ollama_config)?)))
         }
         other => {
@@ -444,7 +460,11 @@ fn parse_router_strategy(s: &str) -> RouterStrategy {
 }
 
 /// Create a tool registry with all available tools.
-fn create_tools(workdir: &PathBuf, graph_store: Option<SharedGraphStore>) -> ToolRegistry {
+fn create_tools(
+    workdir: &PathBuf,
+    graph_store: Option<SharedGraphStore>,
+    doc_store: Option<SharedDocStore>,
+) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
 
     // Add filesystem tools (internal, for RLM use)
@@ -459,6 +479,13 @@ fn create_tools(workdir: &PathBuf, graph_store: Option<SharedGraphStore>) -> Too
         }
     }
 
+    // Add doc tools if we have a doc store (for library documentation search)
+    if let Some(store) = doc_store {
+        for tool in create_doc_tools(store) {
+            registry.register_arc(Arc::from(tool));
+        }
+    }
+
     registry
 }
 
@@ -469,6 +496,21 @@ fn open_graph_store(path: &PathBuf) -> Result<Option<SharedGraphStore>> {
         let store = GraphStore::open(path)?;
         Ok(Some(wrap_store(store)))
     } else {
+        Ok(None)
+    }
+}
+
+/// Open the doc store if it exists.
+fn open_doc_store(path: &PathBuf) -> Result<Option<SharedDocStore>> {
+    if path.exists() {
+        info!("Opening doc store at {}", path.display());
+        let store = DocStore::open(path)?;
+        Ok(Some(wrap_doc_store(store)))
+    } else {
+        debug!(
+            "No doc store at {} - doc tools will not be available",
+            path.display()
+        );
         Ok(None)
     }
 }
@@ -748,12 +790,17 @@ async fn main() -> Result<()> {
             // Canonicalize to resolve relative paths like "." or ".."
             let work_path = work_path.canonicalize().unwrap_or(work_path);
 
+            // Resolve provider+model via the tiered config (router/rlm
+            // inherit from [default] when not overridden).
+            let resolved_router = config.resolved_router();
+            let resolved_rlm = config.resolved_rlm();
+
             // Create separate backends for router and RLM
             // If CLI provides groq_key, use it for both; otherwise use config
             let (router_backend, rlm_backend) = if let Some(key) = cli.groq_key.clone() {
                 info!("Using Groq backend from CLI for both router and RLM");
-                let router_groq = GroqConfig::new(key.clone()).with_model(&config.router.model);
-                let rlm_groq = GroqConfig::new(key).with_model(&config.rlm.model);
+                let router_groq = GroqConfig::new(key.clone()).with_model(&resolved_router.model);
+                let rlm_groq = GroqConfig::new(key).with_model(&resolved_rlm.model);
                 (
                     Some(
                         Arc::new(GroqBackend::new(router_groq)?) as Arc<dyn muninn_rlm::LLMBackend>
@@ -763,16 +810,16 @@ async fn main() -> Result<()> {
             } else {
                 // Create router backend
                 let router_backend = create_backend_from_config(
-                    &config.router.provider,
-                    &config.router.model,
+                    &resolved_router.provider,
+                    &resolved_router.model,
                     &config,
                     config_dir.as_deref(),
                 )?;
 
                 // Create RLM backend
                 let rlm_backend = create_backend_from_config(
-                    &config.rlm.provider,
-                    &config.rlm.model,
+                    &resolved_rlm.provider,
+                    &resolved_rlm.model,
                     &config,
                     config_dir.as_deref(),
                 )?;
@@ -783,25 +830,32 @@ async fn main() -> Result<()> {
             // Log which models are being used
             info!(
                 "Router: {} via {}",
-                config.router.model, config.router.provider
+                resolved_router.model, resolved_router.provider
             );
-            info!("RLM: {} via {}", config.rlm.model, config.rlm.provider);
+            info!("RLM: {} via {}", resolved_rlm.model, resolved_rlm.provider);
 
             // Configure the router with its dedicated backend
             let router_strategy_str = format!("{:?}", router_strategy);
             let router_config = RouterConfig {
                 strategy: router_strategy,
                 enabled: config.router.enabled,
-                router_model: Some(config.router.model.clone()),
+                router_model: Some(resolved_router.model.clone()),
             };
 
             // Open graph store if available
             let graph_path = config.resolve_graph_path(config_dir.as_deref());
             let graph_store = open_graph_store(&graph_path)?;
 
+            // Open doc store if available (default: .muninn/docs.db)
+            let doc_path = config_dir
+                .as_ref()
+                .map(|d| d.join("docs.db"))
+                .unwrap_or_else(|| PathBuf::from(".muninn/docs.db"));
+            let doc_store = open_doc_store(&doc_path)?;
+
             // Create tools
             let tools: Arc<dyn muninn_rlm::ToolEnvironment> =
-                Arc::new(create_tools(&work_path, graph_store));
+                Arc::new(create_tools(&work_path, graph_store, doc_store));
 
             // Create token manager for OAuth support
             let muninn_dir = config_dir
@@ -819,7 +873,7 @@ async fn main() -> Result<()> {
             // Write session metadata
             let session_metadata = session::SessionMetadata::new(&session_id, work_path.clone())
                 .with_router_strategy(&router_strategy_str)
-                .with_rlm_model(&config.rlm.model);
+                .with_rlm_model(&resolved_rlm.model);
             session::write_metadata(&session_dir, &session_metadata)?;
 
             info!("Session: {} -> {:?}", session_id, session_dir);
@@ -942,17 +996,29 @@ root = ".."  # Parent directory (the actual project root)
 path = "graph.db"  # Stored in .muninn/graph.db
 extensions = ["rs", "py", "ts", "js", "go", "c", "cpp", "h"]
 
+# Default LLM provider/model. Router and RLM inherit from this unless they
+# override `provider` / `model` in their own sections. The out-of-the-box
+# default is a single Ollama Cloud model — works on the free tier (concurrent
+# model cap = 1) and maximizes prompt-cache reuse.
+[default]
+provider = "ollama"  # Options: "ollama", "groq", "anthropic", "local"
+model = "gemma4:31b"
+
 # Router configuration (for deciding passthrough vs RLM)
 [router]
 strategy = "llm"  # Options: "llm", "always-rlm", "always-passthrough"
 enabled = true
-provider = "groq"  # Options: "groq", "anthropic", "local"
-model = "llama-3.1-8b-instant"  # Fast, cheap model for routing
+# Override provider/model below to specialize the router on a cheaper/faster
+# model. Leaving them unset inherits from [default].
+# provider = "groq"
+# model = "llama-3.1-8b-instant"
 
 # RLM (Recursive Language Model) configuration
 [rlm]
-provider = "groq"  # Options: "groq", "anthropic", "local"
-model = "qwen/qwen3-32b"  # Capable model for exploration
+# Override to point the recursive-exploration loop at a larger model.
+# Leaving these unset inherits from [default].
+# provider = "groq"
+# model = "qwen/qwen3-32b"
 
 [budget]
 max_tokens = 100000
@@ -961,6 +1027,12 @@ max_tool_calls = 50
 max_duration_secs = 300
 
 # Provider credentials (set here or use env vars)
+[ollama]
+# Ollama Cloud is the default. Set api_key or use OLLAMA_API_KEY env var.
+# To run against a local Ollama daemon instead, override base_url:
+# base_url = "http://localhost:11434/v1"
+# api_key = "..."
+
 # [groq]
 # api_key = "gsk_..."  # Or use GROQ_API_KEY env var
 
@@ -1134,7 +1206,9 @@ max_duration_secs = 300
 
                     if !db_path.exists() {
                         info!("No doc store found at {}", db_path.display());
-                        info!("Use 'muninn docs index-crate' or 'muninn docs index-package' to index libraries.");
+                        info!(
+                            "Use 'muninn docs index-crate' or 'muninn docs index-package' to index libraries."
+                        );
                         return Ok(());
                     }
 
@@ -1157,17 +1231,25 @@ max_duration_secs = 300
                             info!("No {} libraries indexed.", eco.as_str());
                         } else {
                             info!("No libraries indexed.");
-                            info!("Use 'muninn docs index-crate' or 'muninn docs index-package' to index libraries.");
+                            info!(
+                                "Use 'muninn docs index-crate' or 'muninn docs index-package' to index libraries."
+                            );
                         }
                         return Ok(());
                     }
 
-                    println!("{:<20} {:<10} {:<10} {}", "LIBRARY", "VERSION", "ECOSYSTEM", "INDEXED AT");
+                    println!(
+                        "{:<20} {:<10} {:<10} {}",
+                        "LIBRARY", "VERSION", "ECOSYSTEM", "INDEXED AT"
+                    );
                     println!("{}", "-".repeat(60));
                     for lib in &filtered {
                         println!(
                             "{:<20} {:<10} {:<10} {}",
-                            lib.library, lib.version, lib.ecosystem.as_str(), lib.indexed_at
+                            lib.library,
+                            lib.version,
+                            lib.ecosystem.as_str(),
+                            lib.indexed_at
                         );
                     }
                     println!();
@@ -1203,7 +1285,10 @@ max_duration_secs = 300
                     let lib_info = lib.unwrap();
                     info!(
                         "Searching '{}' in {} v{} ({})...",
-                        query, library, lib_info.version, lib_info.ecosystem.as_str()
+                        query,
+                        library,
+                        lib_info.version,
+                        lib_info.ecosystem.as_str()
                     );
 
                     let results = store.search(&library, &query, limit)?;
@@ -1215,7 +1300,12 @@ max_duration_secs = 300
 
                     println!();
                     for (i, result) in results.iter().enumerate() {
-                        println!("{}. {} ({})", i + 1, result.chunk.item_path, result.chunk.item_type.as_str());
+                        println!(
+                            "{}. {} ({})",
+                            i + 1,
+                            result.chunk.item_path,
+                            result.chunk.item_type.as_str()
+                        );
                         if let Some(ref sig) = result.chunk.signature {
                             println!("   {}", sig);
                         }
@@ -1239,10 +1329,7 @@ max_duration_secs = 300
                     let db_path = resolve_db_path(db);
 
                     if !db_path.exists() {
-                        anyhow::bail!(
-                            "No doc store found at {}.",
-                            db_path.display()
-                        );
+                        anyhow::bail!("No doc store found at {}.", db_path.display());
                     }
 
                     let store = DocStore::open(&db_path)?;
@@ -1260,7 +1347,9 @@ max_duration_secs = 300
                         use std::io::{self, Write};
                         print!(
                             "Remove {} v{} ({})? [y/N] ",
-                            lib_info.library, lib_info.version, lib_info.ecosystem.as_str()
+                            lib_info.library,
+                            lib_info.version,
+                            lib_info.ecosystem.as_str()
                         );
                         io::stdout().flush()?;
 
@@ -1277,7 +1366,9 @@ max_duration_secs = 300
                     if store.delete_library(&name)? {
                         info!(
                             "Removed {} v{} ({})",
-                            lib_info.library, lib_info.version, lib_info.ecosystem.as_str()
+                            lib_info.library,
+                            lib_info.version,
+                            lib_info.ecosystem.as_str()
                         );
                     } else {
                         anyhow::bail!("Failed to remove library '{}'", name);
@@ -1330,49 +1421,60 @@ max_duration_secs = 300
                     );
 
                     // Run indexing in blocking task to avoid tokio runtime conflicts
-                    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<(String, String, usize, usize)> {
-                        let store = DocStore::open(&db_path)?;
+                    let result = tokio::task::spawn_blocking(
+                        move || -> anyhow::Result<(String, String, usize, usize)> {
+                            let store = DocStore::open(&db_path)?;
 
-                        // Delete the old entry
-                        store.delete_library(&name)?;
+                            // Delete the old entry
+                            store.delete_library(&name)?;
 
-                        // Re-index based on ecosystem
-                        match ecosystem {
-                            Ecosystem::Rust => {
-                                let config = IndexerConfig {
-                                    keep_source: false,
-                                    work_dir: None,
-                                    rustdoc_flags: Vec::new(),
-                                };
-                                let indexer = RustDocIndexer::with_config(config);
-                                let stats = indexer.index_crate(&store, &name, version.as_deref())?;
-                                Ok((stats.crate_name, stats.version, stats.items_extracted, stats.items_indexed))
+                            // Re-index based on ecosystem
+                            match ecosystem {
+                                Ecosystem::Rust => {
+                                    let config = IndexerConfig {
+                                        keep_source: false,
+                                        work_dir: None,
+                                        rustdoc_flags: Vec::new(),
+                                    };
+                                    let indexer = RustDocIndexer::with_config(config);
+                                    let stats =
+                                        indexer.index_crate(&store, &name, version.as_deref())?;
+                                    Ok((
+                                        stats.crate_name,
+                                        stats.version,
+                                        stats.items_extracted,
+                                        stats.items_indexed,
+                                    ))
+                                }
+                                Ecosystem::Python => {
+                                    let config = PyIndexerConfig {
+                                        keep_source: false,
+                                        work_dir: None,
+                                        ..Default::default()
+                                    };
+                                    let indexer = PyDocIndexer::with_config(config);
+                                    let stats =
+                                        indexer.index_package(&store, &name, version.as_deref())?;
+                                    Ok((
+                                        stats.package_name,
+                                        stats.version,
+                                        stats.items_extracted,
+                                        stats.items_indexed,
+                                    ))
+                                }
+                                Ecosystem::Web => {
+                                    unreachable!("Web ecosystem handled above")
+                                }
                             }
-                            Ecosystem::Python => {
-                                let config = PyIndexerConfig {
-                                    keep_source: false,
-                                    work_dir: None,
-                                    ..Default::default()
-                                };
-                                let indexer = PyDocIndexer::with_config(config);
-                                let stats = indexer.index_package(&store, &name, version.as_deref())?;
-                                Ok((stats.package_name, stats.version, stats.items_extracted, stats.items_indexed))
-                            }
-                            Ecosystem::Web => {
-                                unreachable!("Web ecosystem handled above")
-                            }
-                        }
-                    })
+                        },
+                    )
                     .await??;
 
                     info!(
                         "Updated {} from v{} to v{}",
                         result.0, old_version, result.1
                     );
-                    info!(
-                        "  {} items extracted, {} items indexed",
-                        result.2, result.3
-                    );
+                    info!("  {} items extracted, {} items indexed", result.2, result.3);
                 }
 
                 DocsCommand::IndexLlms {
@@ -1510,15 +1612,22 @@ async fn run_with_agent(launch: AgentLaunchConfig) -> Result<()> {
         .map(|s| parse_router_strategy(&s))
         .unwrap_or_else(|| parse_router_strategy(&launch.config.router.strategy));
 
+    let resolved_router = launch.config.resolved_router();
+    let resolved_rlm = launch.config.resolved_rlm();
+
     let router_config = RouterConfig {
         strategy: router_strategy,
         enabled: launch.config.router.enabled,
-        router_model: Some(launch.config.router.model.clone()),
+        router_model: Some(resolved_router.model.clone()),
     };
 
     // Open graph store if available, or start background indexing
     let graph_path = launch.config.resolve_graph_path(Some(&muninn_dir));
     let graph_store = open_graph_store(&graph_path)?;
+
+    // Open doc store if available (default: .muninn/docs.db)
+    let doc_path = muninn_dir.join("docs.db");
+    let doc_store = open_doc_store(&doc_path)?;
 
     // Start background indexing if graph doesn't exist
     if graph_store.is_none() {
@@ -1537,8 +1646,8 @@ async fn run_with_agent(launch: AgentLaunchConfig) -> Result<()> {
     // If CLI provides groq_key, use it for both; otherwise use config
     let (router_backend, rlm_backend) = if let Some(key) = launch.groq_key.clone() {
         info!("Using Groq backend from CLI for both router and RLM");
-        let router_groq = GroqConfig::new(key.clone()).with_model(&launch.config.router.model);
-        let rlm_groq = GroqConfig::new(key).with_model(&launch.config.rlm.model);
+        let router_groq = GroqConfig::new(key.clone()).with_model(&resolved_router.model);
+        let rlm_groq = GroqConfig::new(key).with_model(&resolved_rlm.model);
         (
             Some(Arc::new(GroqBackend::new(router_groq)?) as Arc<dyn muninn_rlm::LLMBackend>),
             Some(Arc::new(GroqBackend::new(rlm_groq)?) as Arc<dyn muninn_rlm::LLMBackend>),
@@ -1546,16 +1655,16 @@ async fn run_with_agent(launch: AgentLaunchConfig) -> Result<()> {
     } else {
         // Create router backend
         let router_backend = create_backend_from_config(
-            &launch.config.router.provider,
-            &launch.config.router.model,
+            &resolved_router.provider,
+            &resolved_router.model,
             &launch.config,
             Some(&muninn_dir),
         )?;
 
         // Create RLM backend
         let rlm_backend = create_backend_from_config(
-            &launch.config.rlm.provider,
-            &launch.config.rlm.model,
+            &resolved_rlm.provider,
+            &resolved_rlm.model,
             &launch.config,
             Some(&muninn_dir),
         )?;
@@ -1566,16 +1675,13 @@ async fn run_with_agent(launch: AgentLaunchConfig) -> Result<()> {
     // Log which models are being used
     info!(
         "Router: {} via {}",
-        launch.config.router.model, launch.config.router.provider
+        resolved_router.model, resolved_router.provider
     );
-    info!(
-        "RLM: {} via {}",
-        launch.config.rlm.model, launch.config.rlm.provider
-    );
+    info!("RLM: {} via {}", resolved_rlm.model, resolved_rlm.provider);
 
     // Create tools
     let tools: Arc<dyn muninn_rlm::ToolEnvironment> =
-        Arc::new(create_tools(&work_path, graph_store));
+        Arc::new(create_tools(&work_path, graph_store, doc_store));
 
     // Token manager uses the muninn_dir we resolved earlier
     let token_manager = FileTokenManager::new(&muninn_dir);

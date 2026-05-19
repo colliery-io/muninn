@@ -57,44 +57,72 @@ cargo build --release
 
 ### Local Inference with Ollama
 
-For fully local inference, Muninn supports [Ollama](https://ollama.ai):
+For fully local inference, point Muninn at a local [Ollama](https://ollama.ai):
 
 ```bash
 # Install Ollama, then:
 ollama serve
-ollama pull gpt-oss:20b  # or any model you prefer
+ollama pull gemma4:31b  # or any model you prefer
 ```
 
-Then configure Muninn to use it:
+Then override the Ollama base URL in `.muninn/config.toml`:
 ```toml
-[rlm]
-provider = "ollama"
-model = "gpt-oss:20b"
+[ollama]
+base_url = "http://localhost:11434/v1"
 ```
 
 ## Quick Start
 
-1. Create a `.muninn/config.toml` in your project:
+Muninn ships with a **tiered config**: a `[default]` baseline that `[router]`
+and `[rlm]` inherit from. The out-of-the-box default is a single Ollama Cloud
+model (`gemma4:31b`) serving both surfaces — works on the free tier (concurrent
+model cap = 1) and maximizes prompt-cache reuse.
+
+1. Get an [Ollama Cloud](https://ollama.com) API key and export it:
+
+```bash
+export OLLAMA_API_KEY="..."
+```
+
+2. Create a `.muninn/config.toml`. The minimal config is empty — defaults
+   handle the rest:
 
 ```toml
-# Router uses a fast model to classify requests
+# That's it. [default] provides provider=ollama, model=gemma4:31b.
+# [router] and [rlm] inherit unless you override.
+```
+
+3. **Tuning for cost/quality** — override either section when you want to
+   specialize:
+
+```toml
+[default]
+provider = "ollama"
+model = "gemma4:31b"
+
 [router]
+# Cheap/fast model for routing decisions. Inherits provider from [default].
+model = "gemma4:9b"
+
+[rlm]
+# Bigger model for deep exploration. Overrides both provider and model.
+provider = "anthropic"
+model = "claude-haiku-4-5-20251001"
+
+[anthropic]
+api_key = "sk-..."  # or use ANTHROPIC_API_KEY env var
+```
+
+4. **Other providers** — set `[default].provider` and the matching credential
+   section:
+
+```toml
+[default]
 provider = "groq"
 model = "llama-3.1-8b-instant"
 
-# RLM uses a capable model for code exploration
-[rlm]
-provider = "groq"
-model = "qwen/qwen3-32b"
-
-# API keys (or use GROQ_API_KEY / ANTHROPIC_API_KEY env vars)
 [groq]
-api_key = "your-groq-api-key"
-
-# For local inference with Ollama:
-# [rlm]
-# provider = "ollama"
-# model = "gpt-oss:20b"
+api_key = "gsk_..."  # or use GROQ_API_KEY env var
 ```
 
 2. Run Claude Code through Muninn:
