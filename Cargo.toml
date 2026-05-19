@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/muninn",
+    "crates/muninn-core",
     "crates/muninn-graph",
     "crates/muninn-rlm",
     "crates/muninn-tracing",
@@ -36,6 +37,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive", "env"] }
 
 # Internal crates
+muninn-core = { path = "crates/muninn-core" }
 muninn-graph = { path = "crates/muninn-graph" }
 muninn-rlm = { path = "crates/muninn-rlm" }
 muninn-tracing = { path = "crates/muninn-tracing" }

@@ -1,0 +1,18 @@
+[package]
+name = "muninn-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Adapter-neutral engine trait and DTOs shared by muninn's proxy, MCP server, and Claude Code hook plugin."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = "0.1"
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }

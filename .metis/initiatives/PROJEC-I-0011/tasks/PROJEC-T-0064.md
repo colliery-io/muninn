@@ -4,14 +4,14 @@ level: task
 title: "Create muninn-core crate with MuninnEngine trait and supporting types"
 short_code: "PROJEC-T-0064"
 created_at: 2026-05-19T16:41:22.947928+00:00
-updated_at: 2026-05-19T16:41:22.947928+00:00
+updated_at: 2026-05-19T22:07:46.248121+00:00
 parent: PROJEC-I-0011
 blocked_by: []
 archived: false
 
 tags:
   - "#task"
-  - "#phase/todo"
+  - "#phase/completed"
 
 
 exit_criteria_met: false
@@ -55,4 +55,16 @@ None — this is the foundation everything else builds on.
 
 ## Status Updates
 
-*To be added during implementation.*
+### 2026-05-19 — Implementation landed
+
+- New crate `crates/muninn-core/` added to the workspace (and to `[workspace.dependencies]`).
+- `MuninnEngine` async trait defined in `src/lib.rs` with the six agreed methods. Trait is object-safe; downstream consumes the `SharedEngine = Arc<dyn MuninnEngine>` type alias.
+- Request/response DTOs defined in `src/types.rs` with serde derives and `skip_serializing_if = "Option::is_none"` on optional fields so the wire form stays tight. Types cover all six methods.
+- Error type `MuninnCoreError` in `src/error.rs` — coarse, adapter-friendly variants (`InvalidRequest`, `NotFound`, `BudgetExceeded`, `Backend`, `Storage`, `Internal`) plus an `internal(msg)` helper.
+- Dependency direction enforced: `cargo tree -p muninn-core` returns only `muninn-core` itself — no `muninn-rlm` or adapter dependencies.
+- Tests: 6 unit tests covering serde roundtrip (minimal + full SearchQuery), snake_case enum serialization for `GraphQueryKind`, optional-field skip behavior for `MemoryItem`, and error display. All pass.
+- Strict clippy on `muninn-core`: clean.
+- `cargo fmt --check -p muninn-core`: clean.
+
+### CI carve-out
+Same situation as PROJEC-T-0063: this crate is clean end-to-end, but workspace-level `angreal ci` still fails on the pre-existing `muninn-graph` clippy debt tracked in PROJEC-T-0076.
