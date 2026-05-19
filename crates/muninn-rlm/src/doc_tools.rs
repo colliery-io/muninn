@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use muninn_graph::doc_store::{DocStore, Ecosystem};
 use muninn_graph::registry::{
-    PyDocIndexer, PyIndexerConfig, PyIndexerError, RustDocIndexer, IndexerConfig, IndexerError,
+    IndexerConfig, IndexerError, PyDocIndexer, PyIndexerConfig, PyIndexerError, RustDocIndexer,
 };
 
 use crate::error::{Result, RlmError};
@@ -104,9 +104,12 @@ impl Tool for SearchDocsTool {
                 RlmError::ToolExecution("Missing required parameter 'library'".to_string())
             })?;
 
-        let query = params.get("query").and_then(|v| v.as_str()).ok_or_else(|| {
-            RlmError::ToolExecution("Missing required parameter 'query'".to_string())
-        })?;
+        let query = params
+            .get("query")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                RlmError::ToolExecution("Missing required parameter 'query'".to_string())
+            })?;
 
         let limit = params
             .get("limit")
@@ -117,9 +120,9 @@ impl Tool for SearchDocsTool {
         let store = lock_store(&self.store)?;
 
         // Check if library exists
-        let lib = store.get_library(library).map_err(|e| {
-            RlmError::ToolExecution(format!("Failed to get library: {}", e))
-        })?;
+        let lib = store
+            .get_library(library)
+            .map_err(|e| RlmError::ToolExecution(format!("Failed to get library: {}", e)))?;
 
         if lib.is_none() {
             return Ok(ToolResult::text(format!(
@@ -131,9 +134,9 @@ impl Tool for SearchDocsTool {
         let lib_info = lib.unwrap();
 
         // Search documentation
-        let results = store.search(library, query, limit).map_err(|e| {
-            RlmError::ToolExecution(format!("Search failed: {}", e))
-        })?;
+        let results = store
+            .search(library, query, limit)
+            .map_err(|e| RlmError::ToolExecution(format!("Search failed: {}", e)))?;
 
         if results.is_empty() {
             return Ok(ToolResult::text(format!(
@@ -148,7 +151,10 @@ impl Tool for SearchDocsTool {
             .map(|r| {
                 let mut obj = serde_json::Map::new();
                 obj.insert("path".to_string(), serde_json::json!(r.chunk.item_path));
-                obj.insert("type".to_string(), serde_json::json!(r.chunk.item_type.as_str()));
+                obj.insert(
+                    "type".to_string(),
+                    serde_json::json!(r.chunk.item_type.as_str()),
+                );
                 obj.insert("doc".to_string(), serde_json::json!(r.chunk.doc_text));
                 if let Some(ref sig) = r.chunk.signature {
                     obj.insert("signature".to_string(), serde_json::json!(sig));
@@ -506,9 +512,9 @@ impl Tool for ListLibrariesTool {
 
         let store = lock_store(&self.store)?;
 
-        let libraries = store.list_libraries().map_err(|e| {
-            RlmError::ToolExecution(format!("Failed to list libraries: {}", e))
-        })?;
+        let libraries = store
+            .list_libraries()
+            .map_err(|e| RlmError::ToolExecution(format!("Failed to list libraries: {}", e)))?;
 
         // Filter by ecosystem if specified
         let filtered: Vec<_> = libraries
@@ -524,7 +530,8 @@ impl Tool for ListLibrariesTool {
             let msg = if let Some(eco) = ecosystem_filter {
                 format!("No {} libraries are indexed.", eco.as_str())
             } else {
-                "No libraries are indexed. Use index_crate or index_package to add libraries.".to_string()
+                "No libraries are indexed. Use index_crate or index_package to add libraries."
+                    .to_string()
             };
             return Ok(ToolResult::text(msg));
         }

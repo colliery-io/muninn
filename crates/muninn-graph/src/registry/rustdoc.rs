@@ -381,7 +381,10 @@ fn extract_item<'a>(
             let sig = format_type_alias_signature(krate, t, item.name.as_deref(), cache);
             (ItemType::Type, Some(sig))
         }
-        ItemEnum::Constant { type_: ty, const_: c } => {
+        ItemEnum::Constant {
+            type_: ty,
+            const_: c,
+        } => {
             let sig = format_constant_signature(krate, ty, c, item.name.as_deref(), cache);
             (ItemType::Constant, Some(sig))
         }
@@ -666,7 +669,9 @@ fn format_type<'a>(
                                     Some(format_type(krate, t, cache))
                                 }
                                 rustdoc_types::GenericArg::Lifetime(l) => Some(l.clone()),
-                                rustdoc_types::GenericArg::Const(c) => Some(c.value.clone().unwrap_or_else(|| c.expr.clone())),
+                                rustdoc_types::GenericArg::Const(c) => {
+                                    Some(c.value.clone().unwrap_or_else(|| c.expr.clone()))
+                                }
                                 _ => None,
                             })
                             .collect();
@@ -706,10 +711,8 @@ fn format_type<'a>(
             if types.is_empty() {
                 "()".to_string()
             } else {
-                let inner: Vec<String> = types
-                    .iter()
-                    .map(|t| format_type(krate, t, cache))
-                    .collect();
+                let inner: Vec<String> =
+                    types.iter().map(|t| format_type(krate, t, cache)).collect();
                 format!("({})", inner.join(", "))
             }
         }
@@ -822,7 +825,10 @@ mod tests {
         assert_eq!(chunk.item_path, "my_crate::my_func");
         assert_eq!(chunk.item_type, ItemType::Function);
         assert_eq!(chunk.doc_text, "This is a function.");
-        assert_eq!(chunk.signature, Some("fn my_func(x: i32) -> bool".to_string()));
+        assert_eq!(
+            chunk.signature,
+            Some("fn my_func(x: i32) -> bool".to_string())
+        );
     }
 
     #[test]
@@ -868,7 +874,9 @@ mod tests {
             .output();
 
         if nightly_check.is_err() || !nightly_check.unwrap().status.success() {
-            eprintln!("Skipping test: nightly Rust not available. Install with: rustup install nightly");
+            eprintln!(
+                "Skipping test: nightly Rust not available. Install with: rustup install nightly"
+            );
             return;
         }
 

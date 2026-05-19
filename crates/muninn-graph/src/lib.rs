@@ -19,8 +19,8 @@ pub mod watcher;
 
 pub use builder::{BuildError, BuildStats, GraphBuilder};
 pub use doc_store::{
-    DocChunk, DocChunkInput, DocLibrary, DocStore, DocStoreError, Ecosystem, ItemType,
-    ScoredChunk, SearchMode,
+    DocChunk, DocChunkInput, DocLibrary, DocStore, DocStoreError, Ecosystem, ItemType, ScoredChunk,
+    SearchMode,
 };
 pub use edges::{CallType, Edge, EdgeKind};
 pub use lang::python::PythonExtractor;

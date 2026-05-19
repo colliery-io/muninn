@@ -61,7 +61,10 @@ fn test_index_crate_thiserror() {
     assert!(!lib.version.is_empty());
 
     // Verify we indexed some items
-    assert!(stats.items_indexed > 0, "Should have indexed at least one item");
+    assert!(
+        stats.items_indexed > 0,
+        "Should have indexed at least one item"
+    );
 
     // Search for "Error" - thiserror's main export
     let results = store
@@ -122,7 +125,11 @@ fn test_index_crate_once_cell() {
 
     println!("Search results for 'Lazy initialization':");
     for result in &results {
-        println!("  - {} ({})", result.chunk.item_path, result.chunk.item_type.as_str());
+        println!(
+            "  - {} ({})",
+            result.chunk.item_path,
+            result.chunk.item_type.as_str()
+        );
     }
 
     assert!(
@@ -200,9 +207,7 @@ fn test_index_package_six() {
     assert_eq!(lib.ecosystem, Ecosystem::Python);
 
     // Search for Python version compatibility
-    let results = store
-        .search("six", "python", 10)
-        .expect("Search failed");
+    let results = store.search("six", "python", 10).expect("Search failed");
 
     println!("Search results for 'python':");
     for result in &results {
@@ -315,10 +320,7 @@ fn test_index_llmstxt_mintlify_fast() {
     }
 
     assert!(stats.links_indexed > 0, "Should have indexed some links");
-    assert!(
-        !results.is_empty(),
-        "Should find results for 'components'"
-    );
+    assert!(!results.is_empty(), "Should find results for 'components'");
 }
 
 /// Index Anthropic's llms.txt (if available).
@@ -442,9 +444,7 @@ fn test_remove_and_reindex() {
     );
 
     // Remove
-    let deleted = store
-        .delete_library("thiserror")
-        .expect("Failed to delete");
+    let deleted = store.delete_library("thiserror").expect("Failed to delete");
 
     assert!(deleted, "Should have deleted library");
     assert!(

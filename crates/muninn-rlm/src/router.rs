@@ -297,7 +297,7 @@ struct RouteDecisionInput {
 }
 
 /// System prompt for the router LLM.
-const ROUTER_SYSTEM_PROMPT: &str = "You route requests. Use 'rlm' for questions about code structure, implementation, architecture, or anything requiring reading source files. Use 'passthrough' for commands, log analysis, or tasks that don't need source code exploration.";
+const ROUTER_SYSTEM_PROMPT: &str = "You route requests. Use 'rlm' for questions about code structure, implementation, architecture, how to use libraries/dependencies, or anything requiring code exploration. Use 'passthrough' for commands, log analysis, or tasks that don't need exploration.";
 
 /// Build the user message for the router LLM.
 fn build_router_user_message(user_request: &str) -> String {
@@ -309,7 +309,7 @@ USER REQUEST:
 
 ROUTING RULES:
 
-Use "rlm" for questions about SOURCE CODE, implementation, or architecture:
+Use "rlm" for questions about SOURCE CODE, implementation, architecture, or library usage:
 - "How does authentication work in this app?"
 - "Explain the implementation of X"
 - "Help me understand how information flows through Y"
@@ -317,6 +317,10 @@ Use "rlm" for questions about SOURCE CODE, implementation, or architecture:
 - "What does the Config struct look like?"
 - "Find the function that handles X"
 - "Show me the codebase structure"
+- "How do I use tokio::spawn?"
+- "What's the API for reqwest::Client?"
+- "How should I use serde for JSON parsing?"
+- "Help me use this dependency correctly"
 
 Use "passthrough" for operational tasks that don't need code exploration:
 - Running commands ("run tests", "build", "grep for X")
@@ -325,7 +329,7 @@ Use "passthrough" for operational tasks that don't need code exploration:
 - Follow-up clarifying questions about previous answers
 - General conversation ("ping", "what happened?")
 
-If the request asks about "implementation", "architecture", "how X works", or "code structure", use rlm."#,
+If the request asks about "implementation", "architecture", "how X works", "code structure", or "how to use" a library/dependency, use rlm."#,
         user_request
     )
 }
@@ -341,7 +345,7 @@ fn route_decision_tool() -> ToolDefinition {
                 "route": {
                     "type": "string",
                     "enum": ["rlm", "passthrough"],
-                    "description": "Use 'rlm' for SOURCE CODE exploration, 'passthrough' for everything else."
+                    "description": "Use 'rlm' for SOURCE CODE exploration or library/dependency usage questions, 'passthrough' for everything else."
                 },
                 "reason": {
                     "type": "string",

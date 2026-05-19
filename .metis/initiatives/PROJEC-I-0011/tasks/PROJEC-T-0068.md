@@ -1,0 +1,54 @@
+---
+id: implement-muninn-mcp-stdio
+level: task
+title: "Implement muninn mcp stdio subcommand backed by daemon IPC"
+short_code: "PROJEC-T-0068"
+created_at: 2026-05-19T16:41:29.207302+00:00
+updated_at: 2026-05-19T16:41:29.207302+00:00
+parent: PROJEC-I-0011
+blocked_by: []
+archived: false
+
+tags:
+  - "#task"
+  - "#phase/todo"
+
+
+exit_criteria_met: false
+initiative_id: PROJEC-I-0011
+---
+
+# Implement muninn mcp stdio subcommand backed by daemon IPC
+
+## Parent Initiative
+
+[[hook-mcp-integration-layer-for-claude-code]] (PROJEC-I-0011)
+
+## Objective
+
+Add a `muninn mcp` subcommand that runs an MCP server over stdio (CC's default transport). The server exposes the tool schemas from PROJEC-T-0067 and routes each call through the daemon IPC from PROJEC-T-0066. The MCP process itself is stateless — a thin protocol adapter; the daemon does the work.
+
+## Acceptance Criteria
+
+- [ ] `muninn mcp` starts a stdio MCP server speaking the current MCP wire protocol.
+- [ ] Server advertises the tools defined in PROJEC-T-0067.
+- [ ] On each invocation: ensure daemon is running, send IPC request, return result as MCP tool response.
+- [ ] Errors map cleanly: daemon unreachable → MCP tool error with actionable message; engine error → MCP tool error with engine message; timeout → MCP tool error.
+- [ ] Integration test: spawn `muninn mcp` as a subprocess, send MCP initialize + a `search_code` tool call, verify the response.
+- [ ] Manual smoke test: point CC's `mcp.json` at `muninn mcp`, start a CC session, verify the tools appear and at least one returns results.
+- [ ] `angreal ci` passes.
+
+## Dependencies
+
+- PROJEC-T-0066 (daemon + IPC)
+- PROJEC-T-0067 (tool schemas)
+
+## Implementation Notes
+
+- Use an existing Rust MCP server crate if a mature one exists; otherwise hand-roll the small protocol surface we need.
+- Keep this binary thin. Anything that looks like "logic" probably belongs in the daemon.
+- Log to stderr only — stdout is reserved for MCP protocol bytes.
+
+## Status Updates
+
+*To be added during implementation.*

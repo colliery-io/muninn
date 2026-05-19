@@ -408,12 +408,8 @@ impl LlmsTxtIndexer {
         let mut links_failed = 0;
 
         // Create library entry
-        let library_id = store.upsert_library(
-            &llms_txt.name,
-            Ecosystem::Web,
-            "llms.txt",
-            Some(source_url),
-        )?;
+        let library_id =
+            store.upsert_library(&llms_txt.name, Ecosystem::Web, "llms.txt", Some(source_url))?;
 
         // Prepare chunks
         let mut chunks: Vec<DocChunkInput> = Vec::new();
@@ -505,7 +501,10 @@ impl LlmsTxtIndexer {
     /// Map section names to item types.
     fn section_to_item_type(section: &str) -> ItemType {
         let lower = section.to_lowercase();
-        if lower.contains("guide") || lower.contains("tutorial") || lower.contains("getting started") {
+        if lower.contains("guide")
+            || lower.contains("tutorial")
+            || lower.contains("getting started")
+        {
             ItemType::Guide
         } else {
             ItemType::Page
@@ -659,10 +658,12 @@ mod tests {
         assert_eq!(parsed.name, "Mintlify");
         assert_eq!(parsed.links.len(), 2);
         assert_eq!(parsed.links[0].title, "Customize agent behavior");
-        assert!(parsed.links[0]
-            .description
-            .as_ref()
-            .unwrap()
-            .contains("AGENTS.md"));
+        assert!(
+            parsed.links[0]
+                .description
+                .as_ref()
+                .unwrap()
+                .contains("AGENTS.md")
+        );
     }
 }

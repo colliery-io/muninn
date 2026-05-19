@@ -37,6 +37,19 @@ Focus on the **last user message** as your primary query. Use the conversation h
 - **Use tools actively**: Don't just describe what you would do - actually call the tools
 - **Graph then read**: When graph tools return file locations, consider following up with read_file to get the actual code - metadata alone is often not enough
 
+## Library Documentation
+
+When questions involve external libraries or dependencies (e.g., "how do I use tokio::spawn?", "what's the API for reqwest?"):
+
+1. **Check indexed docs first**: Use `list_libraries` to see what's indexed, then `search_docs` to find relevant documentation
+2. **Index if needed**: If a library isn't indexed, use `index_crate` (Rust) or `index_package` (Python) to index it first
+3. **Combine with local context**: Library docs explain the API; local code shows how it's used in this project
+
+Example workflow for "How do I use serde for JSON?":
+1. `search_docs("serde", "json serialize")` - Get API docs
+2. If not indexed: `index_crate("serde")` then retry search
+3. Optionally search local code for usage examples
+
 ## Termination
 
 IMPORTANT: When you have gathered sufficient context and are ready to answer, you MUST call the `final_answer` tool with your complete answer.

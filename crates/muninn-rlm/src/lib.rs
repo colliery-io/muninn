@@ -41,12 +41,12 @@ pub use backend::{
     StreamEvent, default_format_tool_definitions, default_format_tool_result,
 };
 pub use context::{ContextAggregator, ContextBuilder, ContextItem};
-pub use engine::{EngineConfig, EngineDeps, ExplorationContext, RecursiveEngine};
-pub use error::{BudgetExceededError, BudgetType, Result, RlmError};
 pub use doc_tools::{
     IndexCrateTool, IndexPackageTool, ListLibrariesTool, SearchDocsTool, SharedDocStore,
     create_doc_tools, wrap_doc_store,
 };
+pub use engine::{EngineConfig, EngineDeps, ExplorationContext, RecursiveEngine};
+pub use error::{BudgetExceededError, BudgetType, Result, RlmError};
 pub use fs::{
     DirEntry, FileMetadata, FileSystem, MockFileSystem, RealFileSystem, SharedFileSystem,
 };

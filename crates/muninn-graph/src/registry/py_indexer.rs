@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 
 use crate::doc_store::{DocStore, DocStoreError, Ecosystem};
 use crate::registry::{
-    pydoc::{items_to_chunks, PyDocError, PyDocExtractor},
+    pydoc::{PyDocError, PyDocExtractor, items_to_chunks},
     pypi::{PyPiClient, PyPiError},
 };
 
@@ -147,9 +147,9 @@ impl PyDocIndexer {
         let work_dir = self.get_work_dir()?;
 
         // Download the package
-        let (package_path, pkg_version) = self
-            .pypi_client
-            .download_source(package_name, version, &work_dir)?;
+        let (package_path, pkg_version) =
+            self.pypi_client
+                .download_source(package_name, version, &work_dir)?;
 
         // Extract documentation with tree-sitter
         let mut extractor = PyDocExtractor::new();
@@ -161,10 +161,7 @@ impl PyDocIndexer {
         let items_indexed = chunks.len();
 
         // Create library entry and insert chunks
-        let source_url = format!(
-            "https://pypi.org/project/{}/{}/",
-            package_name, pkg_version
-        );
+        let source_url = format!("https://pypi.org/project/{}/{}/", package_name, pkg_version);
         let library_id = store.upsert_library(
             package_name,
             Ecosystem::Python,

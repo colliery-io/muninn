@@ -116,7 +116,11 @@ impl PyPiClient {
     }
 
     /// Get metadata for a specific version.
-    pub fn get_package_version(&self, package_name: &str, version: &str) -> Result<PackageMetadata> {
+    pub fn get_package_version(
+        &self,
+        package_name: &str,
+        version: &str,
+    ) -> Result<PackageMetadata> {
         let url = format!("{}/{}/{}/json", PYPI_API, package_name, version);
 
         let response = self.client.get(&url).send()?;

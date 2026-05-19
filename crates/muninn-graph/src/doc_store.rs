@@ -171,7 +171,11 @@ fn chunks_to_scored(chunks: Vec<DocChunk>) -> Vec<ScoredChunk> {
 ///
 /// Formula: RRF_score(d) = Σ 1 / (k + rank(d))
 /// where k is a constant (typically 60) and rank is 1-indexed.
-fn rrf_fusion(fts_results: &[DocChunk], semantic_results: &[DocChunk], limit: usize) -> Vec<ScoredChunk> {
+fn rrf_fusion(
+    fts_results: &[DocChunk],
+    semantic_results: &[DocChunk],
+    limit: usize,
+) -> Vec<ScoredChunk> {
     use std::collections::HashMap;
 
     // Map chunk ID to (chunk, accumulated RRF score)
@@ -201,7 +205,11 @@ fn rrf_fusion(fts_results: &[DocChunk], semantic_results: &[DocChunk], limit: us
         .map(|(chunk, score)| ScoredChunk { chunk, score })
         .collect();
 
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     results.truncate(limit);
     results
 }
@@ -358,7 +366,12 @@ impl DocStore {
                 version = excluded.version,
                 source_url = excluded.source_url,
                 indexed_at = datetime('now')",
-            rusqlite::params![library, ecosystem.as_str(), version, source_url.unwrap_or("")],
+            rusqlite::params![
+                library,
+                ecosystem.as_str(),
+                version,
+                source_url.unwrap_or("")
+            ],
         )?;
 
         let id: i64 = conn.query_row(
@@ -392,8 +405,9 @@ impl DocStore {
 
         match result {
             Ok((id, lib, eco_str, version, source_url, indexed_at)) => {
-                let ecosystem = Ecosystem::from_str(&eco_str)
-                    .ok_or_else(|| DocStoreError::InvalidData(format!("Invalid ecosystem: {}", eco_str)))?;
+                let ecosystem = Ecosystem::from_str(&eco_str).ok_or_else(|| {
+                    DocStoreError::InvalidData(format!("Invalid ecosystem: {}", eco_str))
+                })?;
 
                 Ok(Some(DocLibrary {
                     id,
@@ -432,8 +446,9 @@ impl DocStore {
         let mut libraries = Vec::new();
         for row in rows {
             let (id, lib, eco_str, version, source_url, indexed_at) = row?;
-            let ecosystem = Ecosystem::from_str(&eco_str)
-                .ok_or_else(|| DocStoreError::InvalidData(format!("Invalid ecosystem: {}", eco_str)))?;
+            let ecosystem = Ecosystem::from_str(&eco_str).ok_or_else(|| {
+                DocStoreError::InvalidData(format!("Invalid ecosystem: {}", eco_str))
+            })?;
 
             libraries.push(DocLibrary {
                 id,
@@ -452,10 +467,8 @@ impl DocStore {
     pub fn delete_library(&self, library: &str) -> Result<bool> {
         let conn = self.sqlite();
 
-        let rows_affected = conn.execute(
-            "DELETE FROM doc_libraries WHERE library = ?1",
-            [library],
-        )?;
+        let rows_affected =
+            conn.execute("DELETE FROM doc_libraries WHERE library = ?1", [library])?;
 
         Ok(rows_affected > 0)
     }
@@ -530,7 +543,8 @@ impl DocStore {
 
     /// Search documentation using full-text search.
     pub fn search_fts(&self, library: &str, query: &str, limit: usize) -> Result<Vec<DocChunk>> {
-        let lib = self.get_library(library)?
+        let lib = self
+            .get_library(library)?
             .ok_or_else(|| DocStoreError::LibraryNotFound(library.to_string()))?;
 
         let conn = self.sqlite();
@@ -576,7 +590,8 @@ impl DocStore {
         query_embedding: &[f32],
         limit: usize,
     ) -> Result<Vec<DocChunk>> {
-        let _lib = self.get_library(library)?
+        let _lib = self
+            .get_library(library)?
             .ok_or_else(|| DocStoreError::LibraryNotFound(library.to_string()))?;
 
         // TODO: Implement semantic search when sqlite-vec is integrated
@@ -654,7 +669,8 @@ impl DocStore {
 
     /// Get all chunks for a library.
     pub fn get_chunks(&self, library: &str) -> Result<Vec<DocChunk>> {
-        let lib = self.get_library(library)?
+        let lib = self
+            .get_library(library)?
             .ok_or_else(|| DocStoreError::LibraryNotFound(library.to_string()))?;
 
         let conn = self.sqlite();
@@ -681,7 +697,8 @@ impl DocStore {
 
     /// Get chunk count for a library.
     pub fn chunk_count(&self, library: &str) -> Result<usize> {
-        let lib = self.get_library(library)?
+        let lib = self
+            .get_library(library)?
             .ok_or_else(|| DocStoreError::LibraryNotFound(library.to_string()))?;
 
         let conn = self.sqlite();
@@ -698,14 +715,21 @@ impl DocStore {
     /// Convert query result rows to DocChunk structs.
     fn rows_to_chunks(
         &self,
-        rows: rusqlite::MappedRows<'_, impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<(i64, i64, String, String, String, Option<String>)>>,
+        rows: rusqlite::MappedRows<
+            '_,
+            impl FnMut(
+                &rusqlite::Row<'_>,
+            )
+                -> rusqlite::Result<(i64, i64, String, String, String, Option<String>)>,
+        >,
     ) -> Result<Vec<DocChunk>> {
         let mut chunks = Vec::new();
 
         for row in rows {
             let (id, library_id, item_path, item_type_str, doc_text, signature) = row?;
-            let item_type = ItemType::from_str(&item_type_str)
-                .ok_or_else(|| DocStoreError::InvalidData(format!("Invalid item type: {}", item_type_str)))?;
+            let item_type = ItemType::from_str(&item_type_str).ok_or_else(|| {
+                DocStoreError::InvalidData(format!("Invalid item type: {}", item_type_str))
+            })?;
 
             chunks.push(DocChunk {
                 id,
@@ -750,7 +774,10 @@ mod tests {
 
         assert!(id > 0);
 
-        let lib = store.get_library("tokio").unwrap().expect("Should find library");
+        let lib = store
+            .get_library("tokio")
+            .unwrap()
+            .expect("Should find library");
         assert_eq!(lib.library, "tokio");
         assert_eq!(lib.ecosystem, Ecosystem::Rust);
         assert_eq!(lib.version, "1.35.0");
@@ -774,7 +801,9 @@ mod tests {
             embedding: None,
         };
 
-        let chunk_id = store.insert_chunk(lib_id, &chunk).expect("Should insert chunk");
+        let chunk_id = store
+            .insert_chunk(lib_id, &chunk)
+            .expect("Should insert chunk");
         assert!(chunk_id > 0);
 
         let count = store.chunk_count("tokio").unwrap();
@@ -807,7 +836,9 @@ mod tests {
             },
         ];
 
-        let inserted = store.insert_chunks_batch(lib_id, &chunks).expect("Should batch insert");
+        let inserted = store
+            .insert_chunks_batch(lib_id, &chunks)
+            .expect("Should batch insert");
         assert_eq!(inserted, 2);
         assert_eq!(store.chunk_count("requests").unwrap(), 2);
     }
@@ -854,13 +885,18 @@ mod tests {
             .upsert_library("test-lib", Ecosystem::Rust, "1.0.0", None)
             .unwrap();
 
-        store.insert_chunk(lib_id, &DocChunkInput {
-            item_path: "test::func".to_string(),
-            item_type: ItemType::Function,
-            doc_text: "A test function.".to_string(),
-            signature: None,
-            embedding: None,
-        }).unwrap();
+        store
+            .insert_chunk(
+                lib_id,
+                &DocChunkInput {
+                    item_path: "test::func".to_string(),
+                    item_type: ItemType::Function,
+                    doc_text: "A test function.".to_string(),
+                    signature: None,
+                    embedding: None,
+                },
+            )
+            .unwrap();
 
         assert!(store.delete_library("test-lib").unwrap());
         assert!(store.get_library("test-lib").unwrap().is_none());
@@ -871,8 +907,12 @@ mod tests {
     fn test_list_libraries() {
         let store = DocStore::open_in_memory().unwrap();
 
-        store.upsert_library("tokio", Ecosystem::Rust, "1.35.0", None).unwrap();
-        store.upsert_library("requests", Ecosystem::Python, "2.31.0", None).unwrap();
+        store
+            .upsert_library("tokio", Ecosystem::Rust, "1.35.0", None)
+            .unwrap();
+        store
+            .upsert_library("requests", Ecosystem::Python, "2.31.0", None)
+            .unwrap();
 
         let libs = store.list_libraries().unwrap();
         assert_eq!(libs.len(), 2);
@@ -930,15 +970,13 @@ mod tests {
             .upsert_library("tokio", Ecosystem::Rust, "1.35.0", None)
             .unwrap();
 
-        let chunks = vec![
-            DocChunkInput {
-                item_path: "tokio::spawn".to_string(),
-                item_type: ItemType::Function,
-                doc_text: "Spawns a new asynchronous task and returns a JoinHandle.".to_string(),
-                signature: None,
-                embedding: None,
-            },
-        ];
+        let chunks = vec![DocChunkInput {
+            item_path: "tokio::spawn".to_string(),
+            item_type: ItemType::Function,
+            doc_text: "Spawns a new asynchronous task and returns a JoinHandle.".to_string(),
+            signature: None,
+            embedding: None,
+        }];
 
         store.insert_chunks_batch(lib_id, &chunks).unwrap();
 
@@ -960,13 +998,18 @@ mod tests {
             .upsert_library("tokio", Ecosystem::Rust, "1.35.0", None)
             .unwrap();
 
-        store.insert_chunk(lib_id, &DocChunkInput {
-            item_path: "tokio::spawn".to_string(),
-            item_type: ItemType::Function,
-            doc_text: "Spawns a new asynchronous task.".to_string(),
-            signature: None,
-            embedding: None,
-        }).unwrap();
+        store
+            .insert_chunk(
+                lib_id,
+                &DocChunkInput {
+                    item_path: "tokio::spawn".to_string(),
+                    item_type: ItemType::Function,
+                    doc_text: "Spawns a new asynchronous task.".to_string(),
+                    signature: None,
+                    embedding: None,
+                },
+            )
+            .unwrap();
 
         // Test convenience search method
         let results = store.search("tokio", "asynchronous", 10).unwrap();
@@ -1023,7 +1066,9 @@ mod tests {
     fn test_search_semantic_stub() {
         let store = DocStore::open_in_memory().unwrap();
 
-        store.upsert_library("tokio", Ecosystem::Rust, "1.35.0", None).unwrap();
+        store
+            .upsert_library("tokio", Ecosystem::Rust, "1.35.0", None)
+            .unwrap();
 
         // Semantic search should return empty (stub implementation)
         let results = store

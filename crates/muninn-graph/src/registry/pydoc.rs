@@ -111,7 +111,10 @@ impl PyDocExtractor {
     /// Extract documentation from a package at the given path.
     ///
     /// The path should point to a directory containing Python source files.
-    pub fn extract_from_path(&mut self, package_path: impl AsRef<Path>) -> Result<Vec<ExtractedPyItem>> {
+    pub fn extract_from_path(
+        &mut self,
+        package_path: impl AsRef<Path>,
+    ) -> Result<Vec<ExtractedPyItem>> {
         let package_path = package_path.as_ref();
 
         if !package_path.exists() {

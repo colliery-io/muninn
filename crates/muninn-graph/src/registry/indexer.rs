@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use crate::doc_store::{DocStore, DocStoreError, Ecosystem};
 use crate::registry::{
     crates_io::{CratesIoClient, CratesIoError},
-    rustdoc::{extract_docs_from_json, items_to_chunks, RustdocError, RustdocExtractor},
+    rustdoc::{RustdocError, RustdocExtractor, extract_docs_from_json, items_to_chunks},
 };
 
 /// Error type for indexer operations.
@@ -369,7 +369,10 @@ mod tests {
 
         match result {
             Ok(stats) => {
-                println!("Indexed {} items from {} v{}", stats.items_indexed, stats.crate_name, stats.version);
+                println!(
+                    "Indexed {} items from {} v{}",
+                    stats.items_indexed, stats.crate_name, stats.version
+                );
                 assert_eq!(stats.crate_name, "cfg-if");
                 assert!(stats.items_extracted > 0);
 
@@ -378,7 +381,9 @@ mod tests {
                 // cfg-if may not have "macro" in its docs, so just verify search works
                 println!("Search returned {} results", search_results.len());
             }
-            Err(IndexerError::Rustdoc(RustdocError::CargoFailed(msg))) if msg.contains("nightly") => {
+            Err(IndexerError::Rustdoc(RustdocError::CargoFailed(msg)))
+                if msg.contains("nightly") =>
+            {
                 eprintln!("Skipping test: {}", msg);
             }
             Err(e) => panic!("Indexing failed: {}", e),
@@ -422,7 +427,9 @@ mod tests {
                 let results = store.search("once_cell", "lazy", 10).unwrap();
                 assert!(!results.is_empty(), "Should find results for 'lazy'");
             }
-            Err(IndexerError::Rustdoc(RustdocError::CargoFailed(msg))) if msg.contains("nightly") => {
+            Err(IndexerError::Rustdoc(RustdocError::CargoFailed(msg)))
+                if msg.contains("nightly") =>
+            {
                 eprintln!("Skipping test: {}", msg);
             }
             Err(e) => panic!("Indexing failed: {}", e),
@@ -447,18 +454,22 @@ mod tests {
         let store = DocStore::open_in_memory().expect("Failed to create store");
         let indexer = RustDocIndexer::new();
 
-        let crates = vec![
-            ("cfg-if", None),
-            ("once_cell", Some("1.19.0")),
-        ];
+        let crates = vec![("cfg-if", None), ("once_cell", Some("1.19.0"))];
 
         let results = indexer.index_batch(&store, &crates);
 
         let successful: Vec<_> = results.iter().filter(|r| r.is_ok()).collect();
-        println!("{} of {} crates indexed successfully", successful.len(), crates.len());
+        println!(
+            "{} of {} crates indexed successfully",
+            successful.len(),
+            crates.len()
+        );
 
         // At least one should succeed (or be skipped due to nightly)
         let libraries = store.list_libraries().unwrap();
-        println!("Libraries in store: {:?}", libraries.iter().map(|l| &l.library).collect::<Vec<_>>());
+        println!(
+            "Libraries in store: {:?}",
+            libraries.iter().map(|l| &l.library).collect::<Vec<_>>()
+        );
     }
 }
