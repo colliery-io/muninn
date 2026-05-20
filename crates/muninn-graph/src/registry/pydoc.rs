@@ -466,23 +466,17 @@ impl PyDocExtractor {
         let mut cursor = block.walk();
         cursor.goto_first_child();
 
-        loop {
-            let node = cursor.node();
-
-            // Look for expression_statement containing a string
-            if node.kind() == "expression_statement" {
-                if let Some(child) = node.child(0) {
-                    if child.kind() == "string" {
-                        let content = self.extract_string_content(&child, source);
-                        if !content.is_empty() {
-                            return Some(content);
-                        }
-                    }
-                }
+        // Only the first statement of the block is considered a
+        // docstring candidate. No `loop { ... break; }` dance.
+        let node = cursor.node();
+        if node.kind() == "expression_statement"
+            && let Some(child) = node.child(0)
+            && child.kind() == "string"
+        {
+            let content = self.extract_string_content(&child, source);
+            if !content.is_empty() {
+                return Some(content);
             }
-
-            // Only check the first statement
-            break;
         }
 
         None

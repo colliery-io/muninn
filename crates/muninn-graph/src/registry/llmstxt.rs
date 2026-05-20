@@ -113,20 +113,22 @@ impl LlmsTxtParser {
                 continue;
             }
 
-            // H1 header - project name
-            if trimmed.starts_with("# ") && !trimmed.starts_with("## ") {
-                name = Some(trimmed[2..].trim().to_string());
+            // H1 header - project name (but not an H2 ## header).
+            if let Some(rest) = trimmed.strip_prefix("# ")
+                && !trimmed.starts_with("## ")
+            {
+                name = Some(rest.trim().to_string());
                 continue;
             }
 
             // H2 header - section name
-            if trimmed.starts_with("## ") {
+            if let Some(rest) = trimmed.strip_prefix("## ") {
                 if in_blockquote && !blockquote_lines.is_empty() {
                     summary = Some(blockquote_lines.join(" "));
                     blockquote_lines.clear();
                     in_blockquote = false;
                 }
-                current_section = trimmed[3..].trim().to_string();
+                current_section = rest.trim().to_string();
                 if !sections.contains_key(&current_section) {
                     sections.insert(current_section.clone(), Vec::new());
                 }
@@ -134,9 +136,9 @@ impl LlmsTxtParser {
             }
 
             // Blockquote - summary
-            if trimmed.starts_with("> ") {
+            if let Some(rest) = trimmed.strip_prefix("> ") {
                 in_blockquote = true;
-                blockquote_lines.push(trimmed[2..].trim().to_string());
+                blockquote_lines.push(rest.trim().to_string());
                 continue;
             }
 
@@ -204,11 +206,7 @@ impl LlmsTxtParser {
         // Check for description after colon
         let description = if close_paren + 1 < line.len() {
             let rest = line[close_paren + 1..].trim();
-            if rest.starts_with(':') {
-                Some(rest[1..].trim().to_string())
-            } else {
-                None
-            }
+            rest.strip_prefix(':').map(|s| s.trim().to_string())
         } else {
             None
         };

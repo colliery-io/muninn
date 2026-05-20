@@ -849,7 +849,7 @@ mod tests {
         assert!(!pid_path.exists(), "stale PID file should be cleaned up");
 
         // Tidy up the still-running test server.
-        let _ = server_task.abort();
+        server_task.abort();
     }
 
     #[tokio::test]

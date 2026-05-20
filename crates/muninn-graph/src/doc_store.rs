@@ -40,6 +40,9 @@ impl Ecosystem {
         }
     }
 
+    // Intentionally returns Option<Self> rather than impl-ing FromStr,
+    // because callers want "no, not one of ours" to be a non-error signal.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "rust" => Some(Ecosystem::Rust),
@@ -85,6 +88,9 @@ impl ItemType {
         }
     }
 
+    // Intentionally returns Option<Self> rather than impl-ing FromStr,
+    // because callers want "no, not one of ours" to be a non-error signal.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "module" => Some(ItemType::Module),
@@ -530,9 +536,9 @@ impl DocStore {
                 ],
             );
 
-            if result.is_err() {
+            if let Err(e) = result {
                 let _ = conn.execute("ROLLBACK", []);
-                return Err(result.unwrap_err().into());
+                return Err(e.into());
             }
             inserted += 1;
         }

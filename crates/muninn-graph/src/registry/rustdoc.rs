@@ -420,27 +420,25 @@ fn extract_nested_items<'a>(
 ) {
     match &item.inner {
         ItemEnum::Struct(s) => {
-            // Extract struct fields
-            match &s.kind {
-                rustdoc_types::StructKind::Plain { fields, .. } => {
-                    for field_id in fields {
-                        if let Some(field_item) = krate.index.get(field_id) {
-                            if let Some(name) = &field_item.name {
-                                let field_path = format!("{}::{}", parent_path, name);
-                                if let Some(docs) = &field_item.docs {
-                                    items.push(ExtractedItem {
-                                        path: field_path,
-                                        item_type: ItemType::Constant, // Use Constant for fields
-                                        doc_text: Some(docs.clone()),
-                                        signature: None,
-                                        visibility: (&field_item.visibility).into(),
-                                    });
-                                }
-                            }
+            // Extract struct fields (plain structs only — skip tuple
+            // and unit forms, which carry no named fields).
+            if let rustdoc_types::StructKind::Plain { fields, .. } = &s.kind {
+                for field_id in fields {
+                    if let Some(field_item) = krate.index.get(field_id)
+                        && let Some(name) = &field_item.name
+                    {
+                        let field_path = format!("{}::{}", parent_path, name);
+                        if let Some(docs) = &field_item.docs {
+                            items.push(ExtractedItem {
+                                path: field_path,
+                                item_type: ItemType::Constant, // Use Constant for fields
+                                doc_text: Some(docs.clone()),
+                                signature: None,
+                                visibility: (&field_item.visibility).into(),
+                            });
                         }
                     }
                 }
-                _ => {} // Skip tuple and unit structs
             }
         }
         ItemEnum::Enum(e) => {
@@ -649,6 +647,11 @@ fn format_generics(generics: &rustdoc_types::Generics) -> String {
 }
 
 /// Format a type for display.
+//
+// `krate` and `cache` look unused in the immediate body but they're
+// threaded through the recursive `format_type(krate, t, cache)` calls
+// further down. Silence clippy's `only_used_in_recursion` for both.
+#[allow(clippy::only_used_in_recursion)]
 fn format_type<'a>(
     krate: &'a Crate,
     ty: &rustdoc_types::Type,

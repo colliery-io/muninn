@@ -1346,8 +1346,8 @@ max_duration_secs = 300
                     }
 
                     println!(
-                        "{:<20} {:<10} {:<10} {}",
-                        "LIBRARY", "VERSION", "ECOSYSTEM", "INDEXED AT"
+                        "{:<20} {:<10} {:<10} INDEXED AT",
+                        "LIBRARY", "VERSION", "ECOSYSTEM",
                     );
                     println!("{}", "-".repeat(60));
                     for lib in &filtered {

@@ -69,7 +69,7 @@ pub struct IndexStats {
 }
 
 /// Configuration for the indexer.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct IndexerConfig {
     /// Keep the downloaded crate source after indexing
     pub keep_source: bool,
@@ -77,16 +77,6 @@ pub struct IndexerConfig {
     pub work_dir: Option<PathBuf>,
     /// Custom rustdoc flags
     pub rustdoc_flags: Vec<String>,
-}
-
-impl Default for IndexerConfig {
-    fn default() -> Self {
-        Self {
-            keep_source: false,
-            work_dir: None,
-            rustdoc_flags: Vec::new(),
-        }
-    }
 }
 
 /// Rust documentation indexer.
