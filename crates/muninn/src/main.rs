@@ -5,6 +5,7 @@
 
 mod config;
 mod hook;
+mod install;
 mod session;
 
 use std::net::SocketAddr;
@@ -224,6 +225,32 @@ enum Commands {
     Hook {
         #[command(subcommand)]
         command: HookCommand,
+    },
+
+    /// Register the muninn MCP server (and print plugin install
+    /// instructions) into a target Claude Code config.
+    ///
+    /// Default scope is the current project (writes `.mcp.json`).
+    /// Use `--global` to write `~/.claude.json` instead.
+    #[command(name = "install-cc")]
+    InstallCc {
+        /// Write to `~/.claude.json` instead of the project `.mcp.json`.
+        #[arg(long)]
+        global: bool,
+        /// Print what would change without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Remove the muninn MCP entry from a target Claude Code config.
+    #[command(name = "uninstall-cc")]
+    UninstallCc {
+        /// Operate on `~/.claude.json` instead of the project `.mcp.json`.
+        #[arg(long)]
+        global: bool,
+        /// Print what would change without writing anything.
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Run a stdio MCP server backed by the muninn engine.
@@ -1618,6 +1645,30 @@ max_duration_secs = 300
             // the hook response from there — so route tracing to stderr.
             init_logging_stderr_only(cli.verbose);
             run_hook_command(command, &config, config_dir.as_deref()).await?;
+        }
+
+        Commands::InstallCc { global, dry_run } => {
+            init_logging(cli.verbose);
+            let scope = if global {
+                install::InstallScope::Global
+            } else {
+                install::InstallScope::Project
+            };
+            let outcome = install::install(scope, config_dir.as_deref(), dry_run)?;
+            println!("{}", install::describe_install(&outcome, scope));
+            println!();
+            println!("{}", install::plugin_install_notice());
+        }
+
+        Commands::UninstallCc { global, dry_run } => {
+            init_logging(cli.verbose);
+            let scope = if global {
+                install::InstallScope::Global
+            } else {
+                install::InstallScope::Project
+            };
+            let outcome = install::uninstall(scope, config_dir.as_deref(), dry_run)?;
+            println!("{}", install::describe_uninstall(&outcome, scope));
         }
 
         Commands::Mcp { socket, no_ensure } => {
