@@ -46,6 +46,10 @@ pub struct Config {
     pub router: RouterConfig,
     /// RLM (Recursive Language Model) settings.
     pub rlm: RlmConfig,
+    /// Hook-decision-model settings (Claude Code PreToolUse hook).
+    /// Inherits provider/model from [`DefaultLlmConfig`] when unset.
+    #[serde(default)]
+    pub hook_decision: HookDecisionConfig,
     /// Budget settings for recursive exploration.
     pub budget: BudgetConfig,
 }
@@ -161,6 +165,21 @@ pub struct RlmConfig {
     /// Provider override for RLM exploration. If `None`, inherits from `[default]`.
     pub provider: Option<String>,
     /// Model override for recursive exploration. If `None`, inherits from `[default]`.
+    pub model: Option<String>,
+}
+
+/// Hook decision-model configuration (used by `muninn hook decide`,
+/// PROJEC-T-0070). `provider` / `model` are optional overrides that
+/// inherit from `[default]` when unset, letting users pin a
+/// smaller/faster model for the hot Grep / Read / Glob path without
+/// touching the router or RLM defaults.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct HookDecisionConfig {
+    /// Provider override for the decision model. If `None`, inherits
+    /// from `[default]`.
+    pub provider: Option<String>,
+    /// Model override. If `None`, inherits from `[default]`.
     pub model: Option<String>,
 }
 
@@ -403,6 +422,24 @@ impl Config {
                 .unwrap_or_else(|| self.default.model.clone()),
         }
     }
+
+    /// Resolve the hook decision-model's effective provider+model after
+    /// applying inheritance from `[default]`. Used by `muninn hook decide`
+    /// (PROJEC-T-0070).
+    pub fn resolved_hook_decision(&self) -> ResolvedLlmConfig {
+        ResolvedLlmConfig {
+            provider: self
+                .hook_decision
+                .provider
+                .clone()
+                .unwrap_or_else(|| self.default.provider.clone()),
+            model: self
+                .hook_decision
+                .model
+                .clone()
+                .unwrap_or_else(|| self.default.model.clone()),
+        }
+    }
 }
 
 /// Configuration validation error.
@@ -431,6 +468,7 @@ impl Config {
 
         let router = self.resolved_router();
         let rlm = self.resolved_rlm();
+        let hook = self.resolved_hook_decision();
         let valid_providers = ["groq", "anthropic", "ollama", "local"];
 
         // Validate router provider
@@ -473,6 +511,25 @@ impl Config {
             });
         }
 
+        // Validate hook_decision provider + model.
+        if !valid_providers.contains(&hook.provider.as_str()) {
+            errors.push(ConfigValidationError {
+                field: "hook_decision.provider".to_string(),
+                message: format!(
+                    "Invalid provider '{}'. Expected one of: {}.",
+                    hook.provider,
+                    valid_providers.join(", ")
+                ),
+            });
+        }
+        if hook.model.is_empty() {
+            errors.push(ConfigValidationError {
+                field: "hook_decision.model".to_string(),
+                message: "hook_decision model cannot be empty (set [hook_decision] model or [default] model)."
+                    .to_string(),
+            });
+        }
+
         // Validate router strategy
         let valid_strategies = [
             "llm",
@@ -493,7 +550,7 @@ impl Config {
         }
 
         // Check for provider-specific configuration
-        if (router.provider == "groq" || rlm.provider == "groq")
+        if (router.provider == "groq" || rlm.provider == "groq" || hook.provider == "groq")
             && self.groq.api_key.is_none()
             && std::env::var("GROQ_API_KEY").is_err()
         {
@@ -503,7 +560,9 @@ impl Config {
                 });
         }
 
-        if (router.provider == "anthropic" || rlm.provider == "anthropic")
+        if (router.provider == "anthropic"
+            || rlm.provider == "anthropic"
+            || hook.provider == "anthropic")
             && self.anthropic.api_key.is_none()
             && std::env::var("ANTHROPIC_API_KEY").is_err()
         {
@@ -513,7 +572,9 @@ impl Config {
                 });
         }
 
-        if (router.provider == "ollama" || rlm.provider == "ollama")
+        if (router.provider == "ollama"
+            || rlm.provider == "ollama"
+            || hook.provider == "ollama")
             && self.ollama.needs_api_key()
             && self.ollama.resolved_api_key().is_none()
         {
@@ -651,6 +712,38 @@ model = "claude-haiku-4-5-20251001"
         assert_eq!(r.model, "claude-haiku-4-5-20251001");
         assert_eq!(m.provider, "anthropic");
         assert_eq!(m.model, "claude-haiku-4-5-20251001");
+    }
+
+    #[test]
+    fn test_hook_decision_inherits_from_default() {
+        let toml = r#"
+[default]
+provider = "ollama"
+model = "gemma4:31b"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let hook = config.resolved_hook_decision();
+        assert_eq!(hook.provider, "ollama");
+        assert_eq!(hook.model, "gemma4:31b");
+    }
+
+    #[test]
+    fn test_hook_decision_override_beats_default() {
+        let toml = r#"
+[default]
+provider = "ollama"
+model = "gemma4:31b"
+
+[hook_decision]
+provider = "groq"
+model = "llama-3.1-8b-instant"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let hook = config.resolved_hook_decision();
+        assert_eq!(hook.provider, "groq");
+        assert_eq!(hook.model, "llama-3.1-8b-instant");
+        // Router still inherits the default.
+        assert_eq!(config.resolved_router().provider, "ollama");
     }
 
     #[test]

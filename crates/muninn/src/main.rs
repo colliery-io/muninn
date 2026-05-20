@@ -218,6 +218,13 @@ enum Commands {
         command: DaemonCommand,
     },
 
+    /// PreToolUse hook plumbing — the `decide` subcommand is invoked
+    /// per-tool-call by the muninn-cc plugin.
+    Hook {
+        #[command(subcommand)]
+        command: HookCommand,
+    },
+
     /// Run a stdio MCP server backed by the muninn engine.
     ///
     /// Auto-ensures the daemon is running, connects a client, and
@@ -269,6 +276,20 @@ enum DaemonCommand {
         #[arg(long)]
         socket: Option<PathBuf>,
     },
+}
+
+/// Subcommands for Claude Code hook integration.
+#[derive(Subcommand)]
+enum HookCommand {
+    /// Read a CC PreToolUse hook-input from stdin and emit the hook
+    /// response on stdout. The muninn-cc plugin shells out to this
+    /// once per `Grep` / `Read` / `Glob` call.
+    ///
+    /// On any failure (parse, decision-model error, timeout, malformed
+    /// model output) this subcommand exits 0 with empty stdout, which
+    /// Claude Code treats as "allow original tool unchanged" — the
+    /// NFR-002 silent-passthrough contract.
+    Decide,
 }
 
 /// Subcommands for documentation management.
@@ -1591,6 +1612,13 @@ max_duration_secs = 300
             run_daemon_command(command, &config, config_dir.as_deref()).await?;
         }
 
+        Commands::Hook { command } => {
+            // Hook decisions must be quiet on stdout — Claude Code reads
+            // the hook response from there — so route tracing to stderr.
+            init_logging_stderr_only(cli.verbose);
+            run_hook_command(command, &config, config_dir.as_deref()).await?;
+        }
+
         Commands::Mcp { socket, no_ensure } => {
             // CRITICAL: log to stderr only. stdout is reserved for MCP
             // protocol frames; mixing tracing output in would corrupt
@@ -1617,6 +1645,235 @@ max_duration_secs = 300
 
     Ok(())
 }
+
+/// Handle `muninn hook …` subcommands. All paths in this handler
+/// return `Ok(())` even on failure — `decide` is contractually
+/// allowed to emit nothing and exit 0, which Claude Code reads as
+/// "allow original tool unchanged" (NFR-002 silent passthrough).
+async fn run_hook_command(
+    command: HookCommand,
+    config: &Config,
+    config_dir: Option<&std::path::Path>,
+) -> Result<()> {
+    match command {
+        HookCommand::Decide => {
+            run_hook_decide(config, config_dir).await;
+            Ok(())
+        }
+    }
+}
+
+/// Body of `muninn hook decide`.
+///
+/// Reads Claude Code's PreToolUse hook input from stdin, asks the
+/// configured decision model whether to pass the call through, augment
+/// it, or rewrite it, and writes the corresponding hook response to
+/// stdout. The whole pipeline is bounded by a 500 ms wall-clock
+/// timeout. Every failure path falls through to a silent passthrough
+/// (return without writing anything to stdout).
+async fn run_hook_decide(config: &Config, config_dir: Option<&std::path::Path>) {
+    const HOOK_DEADLINE: std::time::Duration = std::time::Duration::from_millis(500);
+
+    let outcome = tokio::time::timeout(
+        HOOK_DEADLINE,
+        decide_inner(config, config_dir),
+    )
+    .await;
+
+    let response = match outcome {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
+            tracing::debug!(error = %e, "hook decide errored — passthrough");
+            HookResponse::Passthrough
+        }
+        Err(_) => {
+            tracing::debug!("hook decide timed out — passthrough");
+            HookResponse::Passthrough
+        }
+    };
+    response.write_to_stdout();
+}
+
+/// CC PreToolUse hook input as we care about it. Unknown fields are
+/// tolerated so future CC additions don't break parsing.
+#[derive(serde::Deserialize)]
+struct HookInput {
+    #[serde(default)]
+    tool_name: String,
+    #[serde(default)]
+    tool_input: serde_json::Value,
+}
+
+/// Decision-model output schema. The model is asked to return JSON
+/// matching this shape; deviations fall through to passthrough.
+#[derive(serde::Deserialize, Debug)]
+struct DecisionPayload {
+    decision: String,
+    #[serde(default)]
+    augment_hint: Option<String>,
+    // `rewrite` is part of the documented schema but not honored by
+    // this iteration of the hook — we degrade to passthrough on
+    // rewrite (NFR-002) until PROJEC-T-0071 wires the augmentation
+    // path and PROJEC-T-0070 follow-up implements rewrite handling.
+    #[allow(dead_code)]
+    #[serde(default)]
+    rewrite: Option<serde_json::Value>,
+}
+
+/// What the hook tells Claude Code to do. Translated to JSON on stdout.
+enum HookResponse {
+    Passthrough,
+    Augment(String),
+}
+
+impl HookResponse {
+    fn write_to_stdout(self) {
+        use std::io::Write;
+        match self {
+            // Empty stdout is CC's "allow original" sentinel.
+            HookResponse::Passthrough => {}
+            HookResponse::Augment(context) => {
+                let body = serde_json::json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "additionalContext": context,
+                    }
+                });
+                // Best-effort write; if stdout is broken the contract
+                // collapses to passthrough anyway.
+                let _ = writeln!(std::io::stdout(), "{body}");
+            }
+        }
+    }
+}
+
+async fn decide_inner(
+    config: &Config,
+    config_dir: Option<&std::path::Path>,
+) -> Result<HookResponse> {
+    // Read stdin into a string. CC bounds the hook input size; we
+    // accept whatever it sends.
+    use tokio::io::AsyncReadExt;
+    let mut buf = String::new();
+    tokio::io::stdin()
+        .read_to_string(&mut buf)
+        .await
+        .map_err(|e| anyhow::anyhow!("read stdin: {e}"))?;
+    let input: HookInput = serde_json::from_str(&buf)
+        .map_err(|e| anyhow::anyhow!("parse hook input: {e}"))?;
+
+    // Build the decision-model prompt. Tool args are truncated so the
+    // prompt stays well under our 256-token input budget.
+    let tool_args_short = {
+        let s = input.tool_input.to_string();
+        if s.len() > 400 {
+            format!("{}…(truncated)", &s[..400])
+        } else {
+            s
+        }
+    };
+    let user_prompt = format!(
+        "Tool: {}\nArgs: {}\nReply with valid JSON only.",
+        input.tool_name, tool_args_short
+    );
+
+    // Resolve provider/model via the tiered config and build a
+    // backend. If the provider needs credentials we don't have, fall
+    // through.
+    let resolved = config.resolved_hook_decision();
+    let Some(backend) = create_backend_from_config(
+        &resolved.provider,
+        &resolved.model,
+        config,
+        config_dir,
+    )?
+    else {
+        anyhow::bail!(
+            "no credentials for hook_decision provider {} (model {})",
+            resolved.provider,
+            resolved.model
+        );
+    };
+
+    // Construct a single-turn, non-recursive CompletionRequest. Tight
+    // token budgets keep us inside the 500 ms wall-clock cap.
+    let request = muninn_rlm::CompletionRequest::new(
+        &resolved.model,
+        vec![muninn_rlm::Message::user(user_prompt)],
+        64,
+    )
+    .with_system(HOOK_SYSTEM_PROMPT);
+
+    let response = backend
+        .complete(request)
+        .await
+        .map_err(|e| anyhow::anyhow!("backend: {e}"))?;
+    let text = response.text();
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("empty decision-model response");
+    }
+    // Allow either bare JSON or JSON inside a ```json block — small
+    // models often wrap output in fences.
+    let json_slice = extract_json_block(trimmed).unwrap_or(trimmed);
+    let decision: DecisionPayload = serde_json::from_str(json_slice)
+        .map_err(|e| anyhow::anyhow!("parse decision: {e} (raw={json_slice:?})"))?;
+
+    Ok(match decision.decision.as_str() {
+        "passthrough" => HookResponse::Passthrough,
+        // Augmentation retrieval (PROJEC-T-0071) hasn't landed yet —
+        // until it does, an `augment` decision degrades to a thin
+        // additionalContext block carrying the model's hint. That's
+        // still useful signal for the agent without misrepresenting
+        // muninn's full capabilities.
+        "augment" => match decision.augment_hint {
+            Some(hint) if !hint.trim().is_empty() => {
+                HookResponse::Augment(format!("Muninn hint: {}", hint.trim()))
+            }
+            _ => HookResponse::Passthrough,
+        },
+        // Rewrite needs engine-call wiring (PROJEC-T-0071) that isn't
+        // in place yet; degrade to passthrough per NFR-002.
+        "rewrite" => HookResponse::Passthrough,
+        other => {
+            tracing::debug!(decision = other, "unknown decision — passthrough");
+            HookResponse::Passthrough
+        }
+    })
+}
+
+/// Pull a JSON object out of a possibly-fenced model response.
+fn extract_json_block(text: &str) -> Option<&str> {
+    // Strip ```json … ``` or ``` … ``` fences if present.
+    let stripped = text
+        .strip_prefix("```json\n")
+        .or_else(|| text.strip_prefix("```\n"))
+        .and_then(|s| s.strip_suffix("\n```"));
+    if let Some(inner) = stripped {
+        return Some(inner.trim());
+    }
+    // Otherwise hunt for the first `{` and last `}` — tolerant of
+    // models that prefix the JSON with a rationale paragraph.
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    if end > start {
+        Some(text[start..=end].trim())
+    } else {
+        None
+    }
+}
+
+const HOOK_SYSTEM_PROMPT: &str = "\
+You are muninn's PreToolUse decision model. For each Claude Code tool call you \
+see, decide whether muninn can add value. Reply with JSON only — no prose, no \
+fences:\n\
+{\n\
+  \"decision\": \"passthrough\" | \"augment\" | \"rewrite\",\n\
+  \"rationale\": \"optional short string\",\n\
+  \"augment_hint\": \"optional hint when decision is augment\"\n\
+}\n\
+Default to \"passthrough\". Pick \"augment\" only when you can articulate a \
+specific extra thing muninn knows about this query. Never block the call.";
 
 /// Set up tracing for the MCP subcommand. Writes only to stderr —
 /// stdout is reserved for MCP protocol bytes.
@@ -2125,4 +2382,95 @@ async fn run_oauth_flow(token_manager: &FileTokenManager) -> Result<()> {
     info!("Tokens will auto-refresh when they expire (8-hour lifetime).");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod hook_tests {
+    use super::*;
+
+    #[test]
+    fn extract_json_handles_bare_object() {
+        let s = r#"{"decision":"passthrough"}"#;
+        assert_eq!(extract_json_block(s), Some(s));
+    }
+
+    #[test]
+    fn extract_json_handles_json_fence() {
+        let s = "```json\n{\"decision\":\"augment\"}\n```";
+        assert_eq!(extract_json_block(s), Some(r#"{"decision":"augment"}"#));
+    }
+
+    #[test]
+    fn extract_json_handles_plain_fence() {
+        let s = "```\n{\"decision\":\"passthrough\"}\n```";
+        assert_eq!(
+            extract_json_block(s),
+            Some(r#"{"decision":"passthrough"}"#)
+        );
+    }
+
+    #[test]
+    fn extract_json_tolerates_prefix_prose() {
+        let s = "Here's my answer:\n{\"decision\":\"passthrough\"}\nThanks!";
+        assert_eq!(
+            extract_json_block(s),
+            Some(r#"{"decision":"passthrough"}"#)
+        );
+    }
+
+    #[test]
+    fn extract_json_returns_none_for_no_braces() {
+        assert_eq!(extract_json_block("nothing here"), None);
+    }
+
+    #[test]
+    fn decision_payload_parses_passthrough() {
+        let p: DecisionPayload =
+            serde_json::from_str(r#"{"decision":"passthrough"}"#).unwrap();
+        assert_eq!(p.decision, "passthrough");
+        assert!(p.augment_hint.is_none());
+    }
+
+    #[test]
+    fn decision_payload_parses_augment_with_hint() {
+        let p: DecisionPayload = serde_json::from_str(
+            r#"{"decision":"augment","augment_hint":"recall the auth ADR"}"#,
+        )
+        .unwrap();
+        assert_eq!(p.decision, "augment");
+        assert_eq!(p.augment_hint.as_deref(), Some("recall the auth ADR"));
+    }
+
+    #[test]
+    fn decision_payload_tolerates_extra_fields() {
+        // Small models often include extra keys; we ignore them rather
+        // than failing parse.
+        let p: DecisionPayload = serde_json::from_str(
+            r#"{"decision":"passthrough","rationale":"obvious","mood":"chipper"}"#,
+        )
+        .unwrap();
+        assert_eq!(p.decision, "passthrough");
+    }
+
+    #[test]
+    fn hook_input_parses_minimal_cc_payload() {
+        let json = r#"{
+            "session_id": "abc",
+            "transcript_path": "/tmp/x.jsonl",
+            "tool_name": "Grep",
+            "tool_input": {"pattern": "fn main"}
+        }"#;
+        let input: HookInput = serde_json::from_str(json).unwrap();
+        assert_eq!(input.tool_name, "Grep");
+        assert_eq!(input.tool_input["pattern"], "fn main");
+    }
+
+    #[test]
+    fn hook_input_tolerates_missing_optional_fields() {
+        // Older or newer CC payloads might drop fields we don't read;
+        // we should still parse.
+        let input: HookInput = serde_json::from_str(r#"{"tool_name":"Read"}"#).unwrap();
+        assert_eq!(input.tool_name, "Read");
+        assert!(input.tool_input.is_null());
+    }
 }
