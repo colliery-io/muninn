@@ -1,0 +1,17 @@
+{
+  "description": "muninn-cc PreToolUse hook — augments or rewrites Grep / Read / Glob calls via the local muninn daemon.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Grep|Read|Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/pre-tool-use.sh",
+            "timeout": 1
+          }
+        ]
+      }
+    ]
+  }
+}

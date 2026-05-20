@@ -1,0 +1,16 @@
+{
+  "name": "muninn-cc",
+  "version": "0.0.1",
+  "description": "Augment Claude Code's Grep/Read/Glob tool calls with muninn's persistent context. Talks to a local muninn daemon and either passes the call through, attaches Muninn context, or rewrites the call to a smarter engine method.",
+  "author": {
+    "name": "muninn"
+  },
+  "repository": "https://github.com/colliery-io/muninn",
+  "license": "Apache-2.0",
+  "keywords": [
+    "muninn",
+    "context",
+    "rlm",
+    "claude-code"
+  ]
+}
