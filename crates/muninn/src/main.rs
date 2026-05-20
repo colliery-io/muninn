@@ -2062,10 +2062,34 @@ async fn run_daemon_command(
 
             info!("daemon starting at {}", socket_path.display());
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-            // Forward Ctrl-C / SIGTERM to the shutdown channel so the
-            // socket gets unlinked on the way out.
+            // Forward Ctrl-C *and* SIGTERM (what `muninn daemon stop`
+            // sends) to the shutdown channel so the socket + PID file
+            // get unlinked on the way out. Without the SIGTERM arm,
+            // `stop` would kill the process before serve()'s cleanup
+            // had a chance to run.
             tokio::spawn(async move {
-                let _ = tokio::signal::ctrl_c().await;
+                #[cfg(unix)]
+                {
+                    use tokio::signal::unix::{SignalKind, signal};
+                    let mut sigterm = match signal(SignalKind::terminate()) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "could not install SIGTERM handler");
+                            // Fall back to ctrl_c only.
+                            let _ = tokio::signal::ctrl_c().await;
+                            let _ = shutdown_tx.send(());
+                            return;
+                        }
+                    };
+                    tokio::select! {
+                        _ = tokio::signal::ctrl_c() => {}
+                        _ = sigterm.recv() => {}
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = tokio::signal::ctrl_c().await;
+                }
                 let _ = shutdown_tx.send(());
             });
             muninn_rlm::daemon::serve(engine, &socket_path, shutdown_rx)

@@ -201,6 +201,8 @@ def test_uat(name=None):
     uat_targets = [
         ("muninn", "uat"),
         ("muninn", "hook_failure_modes"),
+        ("muninn", "daemon_lifecycle"),
+        ("muninn", "mcp_protocol"),
     ]
     cargo_cmd = ["cargo", "test"]
     for pkg, target in uat_targets:
