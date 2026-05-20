@@ -315,6 +315,84 @@ fn proxy_records_exploration_metadata() {
     }
 }
 
+/// Implicit-context routing — the user is asking the agent to do an
+/// implementation task ("add a flag to muninn proxy") *without*
+/// mentioning code exploration or using `@muninn explore`. The
+/// router's new bias should choose RLM anyway, because the work
+/// obviously needs project context.
+///
+/// Assertion: the response carries the `muninn` exploration
+/// metadata block, which is only populated when RLM actually fired.
+#[test]
+#[ignore = "UAT — routing/RLM; invoke via `angreal test uat`"]
+fn proxy_router_chooses_rlm_for_implicit_implementation_request() {
+    if skip_if_no_backend("proxy_router_chooses_rlm_for_implicit_implementation_request") {
+        return;
+    }
+    let cfg = stage_proxy_config();
+    let port = pick_port();
+    let proxy = ProxyHandle::start(&cfg, port);
+
+    let body = serde_json::json!({
+        "model": "gemma4:31b",
+        "max_tokens": 1024,
+        "messages": [{
+            "role": "user",
+            "content": "Add a `--no-cors` flag to `muninn proxy` that disables the CORS layer. Where in the code would I need to edit?"
+        }]
+    });
+
+    let resp = send_messages_request(&proxy.base, &body);
+    eprintln!("[uat] response: {}", serde_json::to_string(&resp).unwrap());
+
+    // The muninn metadata block is the routing-decision oracle:
+    // present ⇒ RLM ran, absent ⇒ passthrough (would have failed
+    // without upstream creds anyway, but we don't need to assert that
+    // path — its absence here is what matters).
+    let metadata = resp.get("muninn").unwrap_or_else(|| {
+        panic!(
+            "router chose passthrough for an implicit code request; expected RLM. response: {resp}"
+        )
+    });
+    assert!(metadata.is_object(), "muninn metadata should be an object");
+    eprintln!("[uat] router chose RLM (metadata present): {metadata}");
+}
+
+/// Same idea, different surface — a diagnostic ("why" / "what's
+/// failing") request without an explicit explore directive. Still
+/// obviously needs project context to answer well, so the router
+/// should escalate.
+#[test]
+#[ignore = "UAT — routing/RLM; invoke via `angreal test uat`"]
+fn proxy_router_chooses_rlm_for_implicit_diagnostic_request() {
+    if skip_if_no_backend("proxy_router_chooses_rlm_for_implicit_diagnostic_request") {
+        return;
+    }
+    let cfg = stage_proxy_config();
+    let port = pick_port();
+    let proxy = ProxyHandle::start(&cfg, port);
+
+    let body = serde_json::json!({
+        "model": "gemma4:31b",
+        "max_tokens": 1024,
+        "messages": [{
+            "role": "user",
+            "content": "Why might the muninn daemon's socket file get left behind on the disk after a normal shutdown? What signal handling is involved?"
+        }]
+    });
+
+    let resp = send_messages_request(&proxy.base, &body);
+    eprintln!("[uat] response: {}", serde_json::to_string(&resp).unwrap());
+
+    let metadata = resp.get("muninn").unwrap_or_else(|| {
+        panic!(
+            "router chose passthrough for an implicit diagnostic request; expected RLM. response: {resp}"
+        )
+    });
+    assert!(metadata.is_object(), "muninn metadata should be an object");
+    eprintln!("[uat] router chose RLM (metadata present): {metadata}");
+}
+
 /// Pull plain text out of an Anthropic-style `content` array.
 fn extract_text(resp: &serde_json::Value) -> String {
     let content = resp.get("content").and_then(|c| c.as_array());

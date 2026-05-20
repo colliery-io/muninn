@@ -297,39 +297,75 @@ struct RouteDecisionInput {
 }
 
 /// System prompt for the router LLM.
-const ROUTER_SYSTEM_PROMPT: &str = "You route requests. Use 'rlm' for questions about code structure, implementation, architecture, how to use libraries/dependencies, or anything requiring code exploration. Use 'passthrough' for commands, log analysis, or tasks that don't need exploration.";
+///
+/// Bias: **"rlm" is the default.** Pick "passthrough" only when the
+/// request is plainly answerable without any project source, file
+/// structure, or repo memory. When in doubt, route to rlm — the
+/// recursive engine is cheap, the upstream model can still fall back
+/// to its own tools if muninn over-routes, and most coding-agent
+/// requests benefit from having project context pre-loaded even when
+/// the user didn't ask to "explore."
+const ROUTER_SYSTEM_PROMPT: &str = "\
+You route incoming agent requests between two backends:\n\
+- 'rlm' — runs muninn's recursive exploration engine to gather \
+  code context before answering. THIS IS THE DEFAULT.\n\
+- 'passthrough' — forwards the request to the upstream model \
+  unchanged, with no muninn context.\n\
+\n\
+Pick 'passthrough' ONLY when the answer cannot possibly benefit \
+from the project's source code, file structure, or stored memory: \
+generic explanations, math, format conversions, single-line chat \
+acknowledgements, or an explicit `@muninn passthrough` marker.\n\
+\n\
+For everything else, pick 'rlm'. Implementation work, bug fixes, \
+refactors, diagnostic questions — they all benefit from project \
+context, even when the user didn't ask to 'explore'. If you're \
+unsure, pick 'rlm'.";
 
 /// Build the user message for the router LLM.
 fn build_router_user_message(user_request: &str) -> String {
     format!(
-        r#"Analyze this user request and decide how it should be routed.
+        r#"Decide how to route this agent request.
 
 USER REQUEST:
 {}
 
-ROUTING RULES:
+ROUTING RULES (rlm is the default):
 
-Use "rlm" for questions about SOURCE CODE, implementation, architecture, or library usage:
-- "How does authentication work in this app?"
-- "Explain the implementation of X"
-- "Help me understand how information flows through Y"
-- "Where is the router implemented?"
-- "What does the Config struct look like?"
-- "Find the function that handles X"
-- "Show me the codebase structure"
-- "How do I use tokio::spawn?"
-- "What's the API for reqwest::Client?"
-- "How should I use serde for JSON parsing?"
-- "Help me use this dependency correctly"
+Use "rlm" — anything that might benefit from project source code, file
+structure, or muninn's repo memory. This covers most coding-agent
+requests, including ones that don't explicitly ask to "explore":
 
-Use "passthrough" for operational tasks that don't need code exploration:
-- Running commands ("run tests", "build", "grep for X")
-- Checking logs/output ("check the logs", "what errors occurred?")
-- Writing/editing code when context is already provided
-- Follow-up clarifying questions about previous answers
-- General conversation ("ping", "what happened?")
+- Implementation work: "add a --no-cors flag to muninn proxy", "wire
+  this new field into the config", "extract this helper into a
+  separate module"
+- Bug fixes: "fix the daemon shutdown bug", "the hook is firing
+  twice", "this test is flaky"
+- Refactors: "consolidate these two structs", "rename foo to bar",
+  "convert this to async"
+- Diagnostic questions: "why is X happening", "what's failing here",
+  "where does this error come from"
+- Explicit code questions: "how does authentication work", "where is
+  the router implemented", "show me the Config struct"
+- Library/dependency questions in the project's context: "how does
+  this codebase use tokio::spawn", "what's our serde pattern"
+- Anything mentioning a file path, symbol name, or module in the repo
 
-If the request asks about "implementation", "architecture", "how X works", "code structure", or "how to use" a library/dependency, use rlm."#,
+Use "passthrough" ONLY when the answer cannot possibly benefit from
+the codebase. Floor cases:
+
+- Generic explanations with no project tie-in: "what is HTTP?", "what
+  does the SIGTERM signal do?", "explain mutex vs rwlock"
+- Format conversions on inline content: "turn this JSON into YAML",
+  "indent this snippet"
+- Pure chat / acknowledgements: "thanks", "ok", "ping", "got it"
+- Self-contained math / logic puzzles
+- Explicit `@muninn passthrough` marker in the request
+
+If there's any plausible benefit to code context, pick "rlm". The
+upstream model still has its own grep / read tools as a fallback if
+muninn over-routes — over-routing wastes a bit of compute, but
+under-routing loses the context muninn was built to provide."#,
         user_request
     )
 }
@@ -345,7 +381,7 @@ fn route_decision_tool() -> ToolDefinition {
                 "route": {
                     "type": "string",
                     "enum": ["rlm", "passthrough"],
-                    "description": "Use 'rlm' for SOURCE CODE exploration or library/dependency usage questions, 'passthrough' for everything else."
+                    "description": "'rlm' is the default — pick it whenever the request might benefit from project source code, file structure, or repo memory (most coding-agent work qualifies). Use 'passthrough' only for requests that can't possibly benefit from project context: generic explanations, format conversions, math, or pure chat."
                 },
                 "reason": {
                     "type": "string",
