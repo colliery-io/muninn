@@ -18,6 +18,7 @@ pub mod fs_tools;
 pub mod graph_tools;
 pub mod groq;
 pub mod mcp;
+pub mod mcp_engine_server;
 pub mod memory_tools;
 pub mod oauth;
 pub mod ollama;
@@ -104,3 +105,10 @@ pub use types::{
 pub mod daemon {
     pub use muninn_core::daemon::*;
 }
+
+/// Adapter-neutral engine trait + handle type.
+///
+/// Re-exported from `muninn-core` so muninn-rlm consumers can hold
+/// `Arc<dyn MuninnEngine>` (aliased as `SharedEngine`) without naming
+/// the upstream crate directly.
+pub use muninn_core::{MuninnEngine, SharedEngine};

@@ -693,8 +693,12 @@ mod tests {
     }
 
     fn temp_socket() -> PathBuf {
-        let dir = tempfile::tempdir().unwrap().into_path();
-        dir.join("muninn.sock")
+        // Leak the TempDir for the test lifetime; cleanup is handled by
+        // the OS reclaiming the temp directory after the test exits.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("muninn.sock");
+        std::mem::forget(dir);
+        path
     }
 
     #[tokio::test]

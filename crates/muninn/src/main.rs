@@ -217,6 +217,26 @@ enum Commands {
         #[command(subcommand)]
         command: DaemonCommand,
     },
+
+    /// Run a stdio MCP server backed by the muninn engine.
+    ///
+    /// Auto-ensures the daemon is running, connects a client, and
+    /// exposes the curated engine tool set (search_code, query_graph,
+    /// recall_memory, search_docs) over the Model Context Protocol.
+    /// Intended to be launched by an MCP client (e.g. Claude Code's
+    /// mcp.json).
+    Mcp {
+        /// Override the daemon socket path. Defaults to the repo-scoped
+        /// path under `$XDG_RUNTIME_DIR/muninn/`.
+        #[arg(long)]
+        socket: Option<PathBuf>,
+
+        /// Skip the `daemon ensure` step. Use when the daemon is
+        /// already known to be running (e.g. when this command is
+        /// invoked by `daemon ensure` itself, or in tests).
+        #[arg(long)]
+        no_ensure: bool,
+    },
 }
 
 /// Subcommands for the local-IPC engine daemon.
@@ -1570,9 +1590,46 @@ max_duration_secs = 300
             init_logging(cli.verbose);
             run_daemon_command(command, &config, config_dir.as_deref()).await?;
         }
+
+        Commands::Mcp { socket, no_ensure } => {
+            // CRITICAL: log to stderr only. stdout is reserved for MCP
+            // protocol frames; mixing tracing output in would corrupt
+            // every response.
+            init_logging_stderr_only(cli.verbose);
+
+            let socket_path = resolve_daemon_socket(socket, config_dir.as_deref());
+            if !no_ensure {
+                let exe = std::env::current_exe()
+                    .map_err(|e| anyhow::anyhow!("locate muninn binary: {}", e))?;
+                muninn_rlm::daemon::ensure_daemon(&socket_path, &exe)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("daemon ensure: {}", e))?;
+            }
+            let client = muninn_rlm::daemon::DaemonClient::connect(&socket_path)
+                .await
+                .map_err(|e| anyhow::anyhow!("daemon connect: {}", e))?;
+            let engine: muninn_rlm::SharedEngine = Arc::new(client);
+            muninn_rlm::mcp_engine_server::run_engine_mcp_server(engine)
+                .await
+                .map_err(|e| anyhow::anyhow!("mcp server: {}", e))?;
+        }
     }
 
     Ok(())
+}
+
+/// Set up tracing for the MCP subcommand. Writes only to stderr —
+/// stdout is reserved for MCP protocol bytes.
+fn init_logging_stderr_only(verbose: bool) {
+    let filter = if verbose {
+        EnvFilter::new("debug")
+    } else {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
+    };
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt::layer().with_writer(std::io::stderr))
+        .try_init();
 }
 
 /// Resolve the daemon socket path: explicit override > repo-scoped default.
