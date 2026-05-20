@@ -245,12 +245,20 @@ struct ShellHookRun {
 }
 
 fn run_shell_hook(stub_body: Option<&str>, stdin_payload: &str) -> ShellHookRun {
+    run_shell_hook_script("pre-tool-use.sh", stub_body, stdin_payload)
+}
+
+fn run_shell_hook_script(
+    script_name: &str,
+    stub_body: Option<&str>,
+    stdin_payload: &str,
+) -> ShellHookRun {
     let plugin_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent() // crates/
         .and_then(|p| p.parent()) // repo root
         .expect("repo root from CARGO_MANIFEST_DIR")
         .join("plugins/muninn-cc");
-    let script = plugin_root.join("hooks/pre-tool-use.sh");
+    let script = plugin_root.join("hooks").join(script_name);
 
     // Build a temp PATH dir. If we have a stub, drop it there as
     // `muninn`. Otherwise the PATH won't contain a `muninn` binary
@@ -346,6 +354,49 @@ fn shell_hook_muninn_silent_success_is_passthrough() {
     assert!(
         run.stdout.is_empty(),
         "expected empty stdout, got {:?}",
+        run.stdout
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// UserPromptSubmit shell hook — same NFR-002 contract as PreToolUse.
+// ─────────────────────────────────────────────────────────────────────
+
+#[test]
+#[ignore = "failure-mode integration; invoke via `angreal test uat` or `--ignored`"]
+fn submit_hook_no_muninn_on_path_is_passthrough() {
+    let run = run_shell_hook_script("user-prompt-submit.sh", None, r#"{"prompt":"hello"}"#);
+    assert_eq!(run.code, 0);
+    assert!(run.stdout.is_empty(), "got {:?}", run.stdout);
+}
+
+#[test]
+#[ignore = "failure-mode integration; invoke via `angreal test uat` or `--ignored`"]
+fn submit_hook_muninn_nonzero_exit_is_passthrough() {
+    let run = run_shell_hook_script(
+        "user-prompt-submit.sh",
+        Some("#!/bin/sh\nexit 1\n"),
+        r#"{"prompt":"hello"}"#,
+    );
+    assert_eq!(run.code, 0);
+    assert!(run.stdout.is_empty(), "got {:?}", run.stdout);
+}
+
+#[test]
+#[ignore = "failure-mode integration; invoke via `angreal test uat` or `--ignored`"]
+fn submit_hook_relays_muninn_stdout_unchanged() {
+    // Stub muninn that emits a UserPromptSubmit-shaped augment
+    // envelope. The script should relay it verbatim.
+    let stub = r#"#!/bin/sh
+cat <<'PAYLOAD'
+{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"prelude"}}
+PAYLOAD
+"#;
+    let run = run_shell_hook_script("user-prompt-submit.sh", Some(stub), r#"{"prompt":"hello"}"#);
+    assert_eq!(run.code, 0);
+    assert!(
+        run.stdout.contains("UserPromptSubmit") && run.stdout.contains("\"prelude\""),
+        "expected stub output relayed verbatim, got {:?}",
         run.stdout
     );
 }

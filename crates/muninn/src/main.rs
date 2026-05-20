@@ -318,6 +318,14 @@ enum HookCommand {
     /// Claude Code treats as "allow original tool unchanged" — the
     /// NFR-002 silent-passthrough contract.
     Decide,
+
+    /// Read a CC UserPromptSubmit hook-input from stdin and emit a
+    /// turn-start `additionalContext` block on stdout. Fires once per
+    /// user message before Claude starts, so muninn gets to pre-load
+    /// relevant project context into the agent's working set.
+    ///
+    /// Same silent-passthrough-on-failure contract as `decide`.
+    Submit,
 }
 
 /// Subcommands for documentation management.
@@ -1712,6 +1720,10 @@ async fn run_hook_command(
             run_hook_decide(config, config_dir).await;
             Ok(())
         }
+        HookCommand::Submit => {
+            run_hook_submit(config, config_dir).await;
+            Ok(())
+        }
     }
 }
 
@@ -1775,7 +1787,12 @@ enum HookResponse {
 }
 
 impl HookResponse {
+    /// Shorthand for the PreToolUse event — `hook decide`'s caller.
     fn write_to_stdout(self) {
+        self.write_to_stdout_for_event("PreToolUse");
+    }
+
+    fn write_to_stdout_for_event(self, event: &str) {
         use std::io::Write;
         match self {
             // Empty stdout is CC's "allow original" sentinel.
@@ -1783,7 +1800,7 @@ impl HookResponse {
             HookResponse::Augment(context) => {
                 let body = serde_json::json!({
                     "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
+                        "hookEventName": event,
                         "additionalContext": context,
                     }
                 });
@@ -1942,6 +1959,87 @@ fences:\n\
 }\n\
 Default to \"passthrough\". Pick \"augment\" only when you can articulate a \
 specific extra thing muninn knows about this query. Never block the call.";
+
+/// CC UserPromptSubmit hook input shape. Fields we don't read are
+/// tolerated so future CC additions don't break parsing.
+#[derive(serde::Deserialize)]
+struct UserPromptInput {
+    #[serde(default)]
+    prompt: String,
+}
+
+/// Body of `muninn hook submit`. Fires once per user turn before
+/// Claude starts. The decision shape is simpler than `hook decide`:
+/// passthrough or augment. (No rewrite — there's no original tool
+/// call to short-circuit at this point in CC's lifecycle.)
+async fn run_hook_submit(config: &Config, config_dir: Option<&std::path::Path>) {
+    // Generous outer cap: the user is waiting for Claude's first
+    // token anyway, so a couple hundred ms of muninn pre-injection is
+    // an acceptable trade for a turn-shaped context block. Still
+    // bounded so a hung backend can't strand the user.
+    const SUBMIT_DEADLINE: std::time::Duration = std::time::Duration::from_millis(2000);
+
+    let outcome = tokio::time::timeout(SUBMIT_DEADLINE, submit_inner(config, config_dir)).await;
+
+    let response = match outcome {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
+            tracing::debug!(error = %e, "hook submit errored — passthrough");
+            HookResponse::Passthrough
+        }
+        Err(_) => {
+            tracing::debug!("hook submit timed out — passthrough");
+            HookResponse::Passthrough
+        }
+    };
+    response.write_to_stdout_for_event("UserPromptSubmit");
+}
+
+async fn submit_inner(
+    config: &Config,
+    config_dir: Option<&std::path::Path>,
+) -> Result<HookResponse> {
+    use tokio::io::AsyncReadExt;
+    let mut buf = String::new();
+    tokio::io::stdin()
+        .read_to_string(&mut buf)
+        .await
+        .map_err(|e| anyhow::anyhow!("read stdin: {e}"))?;
+    let input: UserPromptInput = serde_json::from_str(&buf)
+        .map_err(|e| anyhow::anyhow!("parse user-prompt-submit input: {e}"))?;
+
+    // Floor cases — fast-path passthrough without burning an LLM
+    // call. Keeps the hook honest for chat-shaped messages and the
+    // explicit `@muninn passthrough` marker.
+    let prompt = input.prompt.trim();
+    if prompt.is_empty() || prompt.contains("@muninn passthrough") || prompt.len() < 8 {
+        return Ok(HookResponse::Passthrough);
+    }
+
+    // Try the retrieval block — recall_memory + query_graph through
+    // the daemon. If the daemon isn't up or nothing useful comes
+    // back, fall through to passthrough.
+    let socket = hook_socket_path(config, config_dir);
+    // The hint into retrieval is the user prompt itself. No tool
+    // args yet (PreToolUse hasn't fired), so we just treat the prompt
+    // as the augment_hint.
+    let block = hook::try_build_augment_block(
+        &socket,
+        "UserPromptSubmit",
+        // tool_input is empty — extract_graph_target() returns None
+        // for unknown tool names, which is what we want here. Memory
+        // retrieval uses augment_hint, so we just pass the prompt.
+        &serde_json::Value::Null,
+        Some(prompt),
+    )
+    .await
+    .unwrap_or(None);
+
+    Ok(match block {
+        Some(b) => HookResponse::Augment(b),
+        None => HookResponse::Passthrough,
+    })
+}
 
 /// Set up tracing for the MCP subcommand. Writes only to stderr —
 /// stdout is reserved for MCP protocol bytes.

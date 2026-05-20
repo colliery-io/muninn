@@ -49,7 +49,21 @@ pub fn default_engine(
     budget: Option<BudgetConfig>,
     work_dir: Option<PathBuf>,
 ) -> Arc<dyn MuninnEngine> {
-    let deps = EngineDeps::new(backend, tools);
+    default_engine_with_memory(backend, tools, budget, work_dir, None)
+}
+
+/// Same as [`default_engine`] but lets the caller plug in a shared
+/// memory store (e.g. SQLite-backed instead of the in-memory default).
+/// Passing `None` falls back to a fresh [`crate::memory_tools::InMemoryStore`].
+pub fn default_engine_with_memory(
+    backend: Arc<dyn LLMBackend>,
+    tools: Arc<dyn ToolEnvironment>,
+    budget: Option<BudgetConfig>,
+    work_dir: Option<PathBuf>,
+    memory: Option<crate::memory_tools::SharedMemoryStore>,
+) -> Arc<dyn MuninnEngine> {
+    let memory = memory.unwrap_or_else(|| Arc::new(crate::memory_tools::InMemoryStore::new()));
+    let deps = EngineDeps::new(backend, tools).with_memory_store(memory);
     let mut config = EngineConfig::default();
     if let Some(b) = budget {
         config = config.with_budget(b);
@@ -66,6 +80,11 @@ pub struct EngineDeps {
     pub backend: Arc<dyn LLMBackend>,
     pub tools: Arc<dyn ToolEnvironment>,
     pub file_system: Option<SharedFileSystem>,
+    /// Shared memory store. When `None`, the [`MuninnEngine`] trait
+    /// methods `recall_memory` / `record_memory` fail with the
+    /// "not yet wired" stub error. Adapters typically attach an
+    /// [`crate::memory_tools::InMemoryStore`] via [`default_engine_with_memory`].
+    pub memory_store: Option<crate::memory_tools::SharedMemoryStore>,
 }
 
 impl EngineDeps {
@@ -74,11 +93,17 @@ impl EngineDeps {
             backend,
             tools,
             file_system: None,
+            memory_store: None,
         }
     }
 
     pub fn with_file_system(mut self, fs: SharedFileSystem) -> Self {
         self.file_system = Some(fs);
+        self
+    }
+
+    pub fn with_memory_store(mut self, store: crate::memory_tools::SharedMemoryStore) -> Self {
+        self.memory_store = Some(store);
         self
     }
 
@@ -157,6 +182,10 @@ pub struct RecursiveEngine {
     tool_executor: ToolExecutor,
     #[allow(dead_code)]
     file_system: SharedFileSystem,
+    /// Optional shared memory store the trait's `recall_memory` /
+    /// `record_memory` methods route through. `None` ⇒ trait methods
+    /// return the "not yet wired" stub error (PROJEC-T-0065 carve-out).
+    pub(crate) memory_store: Option<crate::memory_tools::SharedMemoryStore>,
     default_budget: BudgetConfig,
     work_dir: Option<PathBuf>,
     #[allow(dead_code)]
@@ -174,6 +203,7 @@ impl RecursiveEngine {
             tools: deps.tools,
             tool_executor,
             file_system,
+            memory_store: deps.memory_store,
             default_budget: config.budget,
             work_dir: config.work_dir,
             temperature: config.temperature,

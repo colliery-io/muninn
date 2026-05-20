@@ -1,5 +1,5 @@
 {
-  "description": "muninn-cc PreToolUse hook — augments or rewrites Grep / Read / Glob calls via the local muninn daemon.",
+  "description": "muninn-cc hooks — PreToolUse augments Grep/Read/Glob; UserPromptSubmit pre-injects project context once per user turn.",
   "hooks": {
     "PreToolUse": [
       {
@@ -9,6 +9,18 @@
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/pre-tool-use.sh",
             "timeout": 1
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/user-prompt-submit.sh",
+            "timeout": 3
           }
         ]
       }
