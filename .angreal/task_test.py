@@ -200,6 +200,7 @@ def test_uat(name=None):
     # subprocess UAT in `crates/muninn-rlm/tests/uat.rs`.
     uat_targets = [
         ("muninn", "uat"),
+        ("muninn", "hook_failure_modes"),
     ]
     cargo_cmd = ["cargo", "test"]
     for pkg, target in uat_targets:
