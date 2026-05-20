@@ -17,10 +17,12 @@
 //! later is expensive.
 
 pub mod error;
+pub mod llm;
 pub mod mcp;
 pub mod types;
 
 pub use error::{MuninnCoreError, Result};
+pub use llm::{CompletionRequest, CompletionResponse};
 pub use mcp::{McpToolSchema, SchemaStability, tool_schemas};
 pub use types::{
     DocsHit, DocsQuery, DocsResult, ExploreRequest, ExploreResult, GraphEdge, GraphNode,
@@ -43,6 +45,16 @@ use async_trait::async_trait;
 /// uniformly.
 #[async_trait]
 pub trait MuninnEngine: Send + Sync {
+    /// Rich LLM completion: the existing chat-completion entry point the
+    /// proxy uses. Adapters that already speak the Anthropic Messages API
+    /// (proxy, future hook plugin when it issues a `rewrite` directive)
+    /// call this. The MCP surface uses the other, lightweight methods.
+    ///
+    /// Implementations route this through the recursive exploration loop
+    /// when the request opts into recursion, or fall through to a single
+    /// backend call otherwise.
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse>;
+
     /// Text/regex code search over the working tree, with optional path
     /// and language filters.
     async fn search_code(&self, query: SearchQuery) -> Result<SearchResult>;

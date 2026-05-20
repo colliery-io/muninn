@@ -7,6 +7,7 @@
 mod budget;
 mod context;
 mod dir_tree;
+mod muninn_engine_impl;
 mod tool_executor;
 mod trace;
 
@@ -24,6 +25,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use muninn_core::MuninnEngine;
+
 use crate::backend::LLMBackend;
 use crate::error::Result;
 use crate::fs::{RealFileSystem, SharedFileSystem};
@@ -32,6 +35,30 @@ use crate::tools::ToolEnvironment;
 use crate::types::{
     BudgetConfig, CompletionRequest, CompletionResponse, Message, Role, StopReason, SystemPrompt,
 };
+
+/// Build a default [`MuninnEngine`] from the given backend, tools, and
+/// optional budget/work_dir overrides.
+///
+/// Adapters use this helper to obtain `Arc<dyn MuninnEngine>` without
+/// naming the concrete [`RecursiveEngine`]. Centralizing construction
+/// here keeps the engine-boundary discipline (proxy / MCP server / hook
+/// plugin all depend on the trait, not the impl) honest.
+pub fn default_engine(
+    backend: Arc<dyn LLMBackend>,
+    tools: Arc<dyn ToolEnvironment>,
+    budget: Option<BudgetConfig>,
+    work_dir: Option<PathBuf>,
+) -> Arc<dyn MuninnEngine> {
+    let deps = EngineDeps::new(backend, tools);
+    let mut config = EngineConfig::default();
+    if let Some(b) = budget {
+        config = config.with_budget(b);
+    }
+    if let Some(w) = work_dir {
+        config = config.with_work_dir(w);
+    }
+    Arc::new(RecursiveEngine::new(deps, config))
+}
 
 /// Dependencies for the recursive engine.
 #[derive(Clone)]
@@ -177,13 +204,13 @@ impl RecursiveEngine {
     pub async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse> {
         let cycle_data = RlmCycleTraceData {
             model: request.model.clone(),
-            is_recursive: Self::is_recursive(&request),
+            is_recursive: request.is_recursive(),
             initial_message_count: request.messages.len(),
             system_prompt: request.system.as_ref().map(|s| s.to_text()),
         };
         muninn_tracing::start_span_with_data("rlm_cycle", &cycle_data);
 
-        let request = if Self::is_recursive(&request) {
+        let request = if request.is_recursive() {
             self.prepare_recursive_request(request)
         } else {
             request
@@ -338,10 +365,6 @@ impl RecursiveEngine {
         };
         muninn_tracing::record_event("rlm_completion", Some(&data));
         muninn_tracing::end_span_ok();
-    }
-
-    pub fn is_recursive(request: &CompletionRequest) -> bool {
-        request.muninn.as_ref().is_some_and(|m| m.recursive)
     }
 
     fn extract_final_pattern(response: &CompletionResponse) -> Option<String> {

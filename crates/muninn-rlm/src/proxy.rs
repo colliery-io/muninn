@@ -21,7 +21,9 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use crate::backend::LLMBackend;
-use crate::engine::{EngineConfig, EngineDeps, RecursiveEngine};
+use muninn_core::MuninnEngine;
+
+use crate::engine::default_engine;
 use crate::error::RlmError;
 use crate::passthrough::{Passthrough, PassthroughConfig};
 use crate::router::{RouteDecision, Router as RlmRouter, RouterConfig};
@@ -180,8 +182,10 @@ impl ProxyConfig {
 
 /// Shared state for the proxy server.
 struct ProxyState {
-    /// RLM engine for recursive context building (optional).
-    engine: Option<RecursiveEngine>,
+    /// RLM engine for recursive context building (optional). Held behind
+    /// the [`MuninnEngine`] trait so the proxy doesn't depend on the
+    /// concrete recursive impl in this crate.
+    engine: Option<Arc<dyn MuninnEngine>>,
     /// Router for deciding passthrough vs RLM (optional).
     router: Option<RlmRouter>,
     /// Passthrough client for forwarding to upstream API.
@@ -218,15 +222,12 @@ impl ProxyServer {
         backend: Arc<dyn LLMBackend>,
         tools: Arc<dyn ToolEnvironment>,
     ) -> Self {
-        let deps = EngineDeps::new(backend, tools);
-        let mut engine_config = EngineConfig::default();
-        if let Some(budget) = &config.budget {
-            engine_config = engine_config.with_budget(budget.clone());
-        }
-        if let Some(ref work_dir) = config.work_dir {
-            engine_config = engine_config.with_work_dir(work_dir.clone());
-        }
-        let engine = RecursiveEngine::new(deps, engine_config);
+        let engine = default_engine(
+            backend,
+            tools,
+            config.budget.clone(),
+            config.work_dir.clone(),
+        );
         let router = RlmRouter::new();
         let mut passthrough = Passthrough::with_config(config.passthrough.clone());
         if let Some(tm) = &config.token_manager {
@@ -271,15 +272,12 @@ impl ProxyServer {
         tools: Arc<dyn ToolEnvironment>,
         router_config: RouterConfig,
     ) -> Self {
-        let deps = EngineDeps::new(backend.clone(), tools);
-        let mut engine_config = EngineConfig::default();
-        if let Some(budget) = &config.budget {
-            engine_config = engine_config.with_budget(budget.clone());
-        }
-        if let Some(ref work_dir) = config.work_dir {
-            engine_config = engine_config.with_work_dir(work_dir.clone());
-        }
-        let engine = RecursiveEngine::new(deps, engine_config);
+        let engine = default_engine(
+            backend.clone(),
+            tools,
+            config.budget.clone(),
+            config.work_dir.clone(),
+        );
         let router = RlmRouter::with_config(router_config).with_llm(backend);
         let mut passthrough = Passthrough::with_config(config.passthrough.clone());
         if let Some(tm) = &config.token_manager {
@@ -309,18 +307,15 @@ impl ProxyServer {
         tools: Arc<dyn ToolEnvironment>,
         router_config: RouterConfig,
     ) -> Self {
-        // Use the RLM backend for the engine
-        let deps = EngineDeps::new(rlm_backend, tools);
-        let mut engine_config = EngineConfig::default();
-        if let Some(budget) = &config.budget {
-            engine_config = engine_config.with_budget(budget.clone());
-        }
-        if let Some(ref work_dir) = config.work_dir {
-            engine_config = engine_config.with_work_dir(work_dir.clone());
-        }
-        let engine = RecursiveEngine::new(deps, engine_config);
+        // Use the RLM backend for the engine.
+        let engine = default_engine(
+            rlm_backend,
+            tools,
+            config.budget.clone(),
+            config.work_dir.clone(),
+        );
 
-        // Use the router backend for routing decisions
+        // Use the router backend for routing decisions.
         let router = RlmRouter::with_config(router_config).with_llm(router_backend);
         let mut passthrough = Passthrough::with_config(config.passthrough.clone());
         if let Some(tm) = &config.token_manager {
@@ -339,8 +334,8 @@ impl ProxyServer {
         }
     }
 
-    /// Create a proxy with an existing engine.
-    pub fn with_engine(config: ProxyConfig, engine: RecursiveEngine) -> Self {
+    /// Create a proxy with an existing engine (any [`MuninnEngine`] impl).
+    pub fn with_engine(config: ProxyConfig, engine: Arc<dyn MuninnEngine>) -> Self {
         let router = RlmRouter::new();
         let mut passthrough = Passthrough::with_config(config.passthrough.clone());
         if let Some(tm) = &config.token_manager {
@@ -561,7 +556,7 @@ async fn handle_messages(
     };
 
     // First check for explicit muninn.recursive flag
-    let explicit_recursive = RecursiveEngine::is_recursive(&typed_request);
+    let explicit_recursive = typed_request.is_recursive();
 
     // Use with_tracing to collect trace data for RLM requests
     let (result, trace) = muninn_tracing::with_tracing(async {
@@ -745,6 +740,34 @@ pub struct ProxyError(RlmError);
 impl From<RlmError> for ProxyError {
     fn from(err: RlmError) -> Self {
         Self(err)
+    }
+}
+
+impl From<muninn_core::MuninnCoreError> for ProxyError {
+    fn from(err: muninn_core::MuninnCoreError) -> Self {
+        use muninn_core::MuninnCoreError as E;
+        // Map the adapter-neutral error back into the proxy's wire-shaped
+        // error so the existing `IntoResponse` mapping (with its special
+        // case for budget-exceeded) keeps working.
+        let inner = match err {
+            E::InvalidRequest(s) => RlmError::InvalidRequest(s),
+            E::NotFound(s) => RlmError::InvalidRequest(format!("not found: {s}")),
+            // Round-trip back into the structured BudgetExceededError so
+            // the IntoResponse arm still fires (200 OK + "budget_exceeded"
+            // error type). The original counters are not preserved across
+            // the trait boundary — placeholder values used here; the
+            // IntoResponse arm only cares about the discriminant for
+            // status mapping.
+            E::BudgetExceeded(_) => RlmError::BudgetExceeded(crate::error::BudgetExceededError {
+                budget_type: crate::error::BudgetType::Tokens,
+                limit: 0,
+                actual: 0,
+            }),
+            E::Backend(s) => RlmError::Backend(s),
+            E::Storage(s) => RlmError::Internal(format!("storage: {s}")),
+            E::Internal(s) => RlmError::Internal(s),
+        };
+        Self(inner)
     }
 }
 
