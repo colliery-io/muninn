@@ -8,6 +8,7 @@
 //! Types stay deliberately small. If a field is "nice to have," leave it
 //! out until an adapter actually needs it.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -15,7 +16,7 @@ use serde::{Deserialize, Serialize};
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Text/regex search over the working tree.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SearchQuery {
     /// The pattern to search for. Treated as a regex when `is_regex` is
     /// true; otherwise a literal substring.
@@ -36,7 +37,7 @@ pub struct SearchQuery {
 }
 
 /// A single hit returned by `search_code`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SearchHit {
     pub path: String,
     pub line: u32,
@@ -45,7 +46,7 @@ pub struct SearchHit {
 }
 
 /// Aggregated result of a `search_code` call.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SearchResult {
     pub hits: Vec<SearchHit>,
     /// `true` if the engine truncated results to satisfy `limit`.
@@ -58,7 +59,7 @@ pub struct SearchResult {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Kicks off a recursive LLM-driven exploration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ExploreRequest {
     /// The high-level question the agent wants answered (e.g. "how does
     /// auth work in this repo?").
@@ -73,7 +74,7 @@ pub struct ExploreRequest {
 }
 
 /// Final answer plus the trail of evidence the engine gathered.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ExploreResult {
     /// The engine's synthesized answer.
     pub answer: String,
@@ -90,7 +91,7 @@ pub struct ExploreResult {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Lookup against the engine's persistent memory store.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MemoryQuery {
     /// Natural-language or keyword query. The engine picks the retrieval
     /// strategy (embedding, keyword, hybrid).
@@ -101,7 +102,7 @@ pub struct MemoryQuery {
 }
 
 /// A single match against the memory store.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct MemoryHit {
     /// Opaque identifier; stable across the lifetime of the store.
     pub id: String,
@@ -112,7 +113,7 @@ pub struct MemoryHit {
 }
 
 /// A new entry to persist in the memory store.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MemoryItem {
     /// Markdown content to remember.
     pub content: String,
@@ -127,7 +128,7 @@ pub struct MemoryItem {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Search the indexed library documentation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DocsQuery {
     /// The natural-language query (e.g. "how do tokio joinsets work").
     pub query: String,
@@ -143,7 +144,7 @@ pub struct DocsQuery {
 }
 
 /// A single docs-search hit.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct DocsHit {
     pub library: String,
     pub version: String,
@@ -153,7 +154,7 @@ pub struct DocsHit {
 }
 
 /// Aggregated docs-search result.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct DocsResult {
     pub hits: Vec<DocsHit>,
 }
@@ -163,7 +164,7 @@ pub struct DocsResult {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// What kind of graph relationship to chase from the `target`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GraphQueryKind {
     /// Symbols that call `target`.
@@ -177,7 +178,7 @@ pub enum GraphQueryKind {
 }
 
 /// A graph query.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct GraphQuery {
     /// Symbol name or `file:line` location to query.
     pub target: String,
@@ -188,7 +189,7 @@ pub struct GraphQuery {
 }
 
 /// A node in the result graph.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct GraphNode {
     /// Stable id within this result (e.g. fully-qualified symbol name).
     pub id: String,
@@ -198,7 +199,7 @@ pub struct GraphNode {
 }
 
 /// An edge between two [`GraphNode`]s.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct GraphEdge {
     pub from: String,
     pub to: String,
@@ -207,7 +208,7 @@ pub struct GraphEdge {
 }
 
 /// Aggregated graph-query result.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct GraphResult {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,

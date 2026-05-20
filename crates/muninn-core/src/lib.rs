@@ -17,9 +17,11 @@
 //! later is expensive.
 
 pub mod error;
+pub mod mcp;
 pub mod types;
 
 pub use error::{MuninnCoreError, Result};
+pub use mcp::{McpToolSchema, SchemaStability, tool_schemas};
 pub use types::{
     DocsHit, DocsQuery, DocsResult, ExploreRequest, ExploreResult, GraphEdge, GraphNode,
     GraphQuery, GraphQueryKind, GraphResult, MemoryHit, MemoryItem, MemoryQuery, SearchHit,

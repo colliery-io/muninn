@@ -12,6 +12,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = "0.1"
 thiserror = { workspace = true }
+# JSON Schema generation for the MCP tool surface. Kept here so the
+# schemas can be derived from the same Rust types they describe.
+schemars = "0.8"
 
 [dev-dependencies]
 tokio = { workspace = true }
