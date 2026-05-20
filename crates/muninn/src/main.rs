@@ -4,6 +4,7 @@
 //! providing intelligent request routing and deep context exploration.
 
 mod config;
+mod hook;
 mod session;
 
 use std::net::SocketAddr;
@@ -1674,11 +1675,7 @@ async fn run_hook_command(
 async fn run_hook_decide(config: &Config, config_dir: Option<&std::path::Path>) {
     const HOOK_DEADLINE: std::time::Duration = std::time::Duration::from_millis(500);
 
-    let outcome = tokio::time::timeout(
-        HOOK_DEADLINE,
-        decide_inner(config, config_dir),
-    )
-    .await;
+    let outcome = tokio::time::timeout(HOOK_DEADLINE, decide_inner(config, config_dir)).await;
 
     let response = match outcome {
         Ok(Ok(r)) => r,
@@ -1759,8 +1756,8 @@ async fn decide_inner(
         .read_to_string(&mut buf)
         .await
         .map_err(|e| anyhow::anyhow!("read stdin: {e}"))?;
-    let input: HookInput = serde_json::from_str(&buf)
-        .map_err(|e| anyhow::anyhow!("parse hook input: {e}"))?;
+    let input: HookInput =
+        serde_json::from_str(&buf).map_err(|e| anyhow::anyhow!("parse hook input: {e}"))?;
 
     // Build the decision-model prompt. Tool args are truncated so the
     // prompt stays well under our 256-token input budget.
@@ -1781,12 +1778,8 @@ async fn decide_inner(
     // backend. If the provider needs credentials we don't have, fall
     // through.
     let resolved = config.resolved_hook_decision();
-    let Some(backend) = create_backend_from_config(
-        &resolved.provider,
-        &resolved.model,
-        config,
-        config_dir,
-    )?
+    let Some(backend) =
+        create_backend_from_config(&resolved.provider, &resolved.model, config, config_dir)?
     else {
         anyhow::bail!(
             "no credentials for hook_decision provider {} (model {})",
@@ -1821,25 +1814,49 @@ async fn decide_inner(
 
     Ok(match decision.decision.as_str() {
         "passthrough" => HookResponse::Passthrough,
-        // Augmentation retrieval (PROJEC-T-0071) hasn't landed yet —
-        // until it does, an `augment` decision degrades to a thin
-        // additionalContext block carrying the model's hint. That's
-        // still useful signal for the agent without misrepresenting
-        // muninn's full capabilities.
-        "augment" => match decision.augment_hint {
-            Some(hint) if !hint.trim().is_empty() => {
-                HookResponse::Augment(format!("Muninn hint: {}", hint.trim()))
+        // Augment: try the full retrieval block first
+        // (PROJEC-T-0071); fall back to the model's hint when
+        // retrieval has nothing usable; fall back to passthrough when
+        // we have neither.
+        "augment" => {
+            let socket = hook_socket_path(config, config_dir);
+            let block = hook::try_build_augment_block(
+                &socket,
+                &input.tool_name,
+                &input.tool_input,
+                decision.augment_hint.as_deref(),
+            )
+            .await
+            .unwrap_or(None);
+            match block {
+                Some(b) => HookResponse::Augment(b),
+                None => match decision.augment_hint {
+                    Some(hint) if !hint.trim().is_empty() => {
+                        HookResponse::Augment(format!("Muninn hint: {}", hint.trim()))
+                    }
+                    _ => HookResponse::Passthrough,
+                },
             }
-            _ => HookResponse::Passthrough,
-        },
-        // Rewrite needs engine-call wiring (PROJEC-T-0071) that isn't
-        // in place yet; degrade to passthrough per NFR-002.
+        }
+        // Rewrite needs engine-call wiring beyond what T-0071 ships;
+        // degrade to passthrough per NFR-002 for now.
         "rewrite" => HookResponse::Passthrough,
         other => {
             tracing::debug!(decision = other, "unknown decision — passthrough");
             HookResponse::Passthrough
         }
     })
+}
+
+/// Resolve the daemon socket path the hook should target. Mirrors
+/// `resolve_daemon_socket` but doesn't take a CLI override — the hook
+/// always uses the repo-scoped path that `muninn daemon ensure` would
+/// resolve to.
+fn hook_socket_path(_config: &Config, config_dir: Option<&std::path::Path>) -> PathBuf {
+    let repo_root = config_dir
+        .and_then(|p| p.parent().map(PathBuf::from))
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    muninn_rlm::daemon::socket_path_for_repo(&repo_root)
 }
 
 /// Pull a JSON object out of a possibly-fenced model response.
@@ -2403,19 +2420,13 @@ mod hook_tests {
     #[test]
     fn extract_json_handles_plain_fence() {
         let s = "```\n{\"decision\":\"passthrough\"}\n```";
-        assert_eq!(
-            extract_json_block(s),
-            Some(r#"{"decision":"passthrough"}"#)
-        );
+        assert_eq!(extract_json_block(s), Some(r#"{"decision":"passthrough"}"#));
     }
 
     #[test]
     fn extract_json_tolerates_prefix_prose() {
         let s = "Here's my answer:\n{\"decision\":\"passthrough\"}\nThanks!";
-        assert_eq!(
-            extract_json_block(s),
-            Some(r#"{"decision":"passthrough"}"#)
-        );
+        assert_eq!(extract_json_block(s), Some(r#"{"decision":"passthrough"}"#));
     }
 
     #[test]
@@ -2425,18 +2436,16 @@ mod hook_tests {
 
     #[test]
     fn decision_payload_parses_passthrough() {
-        let p: DecisionPayload =
-            serde_json::from_str(r#"{"decision":"passthrough"}"#).unwrap();
+        let p: DecisionPayload = serde_json::from_str(r#"{"decision":"passthrough"}"#).unwrap();
         assert_eq!(p.decision, "passthrough");
         assert!(p.augment_hint.is_none());
     }
 
     #[test]
     fn decision_payload_parses_augment_with_hint() {
-        let p: DecisionPayload = serde_json::from_str(
-            r#"{"decision":"augment","augment_hint":"recall the auth ADR"}"#,
-        )
-        .unwrap();
+        let p: DecisionPayload =
+            serde_json::from_str(r#"{"decision":"augment","augment_hint":"recall the auth ADR"}"#)
+                .unwrap();
         assert_eq!(p.decision, "augment");
         assert_eq!(p.augment_hint.as_deref(), Some("recall the auth ADR"));
     }

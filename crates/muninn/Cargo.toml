@@ -8,6 +8,7 @@ rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
+muninn-core.workspace = true
 muninn-graph.workspace = true
 muninn-rlm.workspace = true
 muninn-tracing.workspace = true
