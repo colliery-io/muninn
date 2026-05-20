@@ -203,6 +203,7 @@ def test_uat(name=None):
         ("muninn", "hook_failure_modes"),
         ("muninn", "daemon_lifecycle"),
         ("muninn", "mcp_protocol"),
+        ("muninn", "routing"),
     ]
     cargo_cmd = ["cargo", "test"]
     for pkg, target in uat_targets:
