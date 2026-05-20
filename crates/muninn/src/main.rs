@@ -211,6 +211,30 @@ enum Commands {
         #[command(subcommand)]
         command: DocsCommand,
     },
+
+    /// Manage the muninn daemon (engine over local IPC)
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommand,
+    },
+}
+
+/// Subcommands for the local-IPC engine daemon.
+#[derive(Subcommand)]
+enum DaemonCommand {
+    /// Start the daemon in the foreground. Ctrl-C to stop.
+    Start {
+        /// Override the socket path. Defaults to the repo-scoped path
+        /// under `$XDG_RUNTIME_DIR/muninn/` (or platform equivalent).
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+    /// Report whether a daemon is reachable at the socket path.
+    Status {
+        /// Override the socket path (see `start --socket`).
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
 }
 
 /// Subcommands for documentation management.
@@ -1527,9 +1551,108 @@ max_duration_secs = 300
                 }
             }
         }
+
+        Commands::Daemon { command } => {
+            init_logging(cli.verbose);
+            run_daemon_command(command, &config, config_dir.as_deref()).await?;
+        }
     }
 
     Ok(())
+}
+
+/// Resolve the daemon socket path: explicit override > repo-scoped default.
+fn resolve_daemon_socket(
+    explicit: Option<PathBuf>,
+    config_dir: Option<&std::path::Path>,
+) -> PathBuf {
+    if let Some(p) = explicit {
+        return p;
+    }
+    // Use the directory containing `.muninn/` as the repo root so two
+    // adapters running against the same config find the same socket.
+    let repo_root = config_dir
+        .and_then(|p| p.parent().map(PathBuf::from))
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    muninn_rlm::daemon::socket_path_for_repo(&repo_root)
+}
+
+/// Handle `muninn daemon …` subcommands.
+async fn run_daemon_command(
+    command: DaemonCommand,
+    config: &Config,
+    config_dir: Option<&std::path::Path>,
+) -> Result<()> {
+    match command {
+        DaemonCommand::Status { socket } => {
+            let path = resolve_daemon_socket(socket, config_dir);
+            if muninn_rlm::daemon::is_alive(&path).await {
+                println!("alive\t{}", path.display());
+            } else {
+                println!("dead\t{}", path.display());
+            }
+            Ok(())
+        }
+        DaemonCommand::Start { socket } => {
+            let socket_path = resolve_daemon_socket(socket, config_dir);
+
+            // Build a default engine using the resolved tiered config.
+            let resolved_rlm = config.resolved_rlm();
+            let rlm_backend = create_backend_from_config(
+                &resolved_rlm.provider,
+                &resolved_rlm.model,
+                config,
+                config_dir,
+            )?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no backend available for daemon (provider={}, model={}). \
+                     Configure credentials and retry.",
+                    resolved_rlm.provider,
+                    resolved_rlm.model
+                )
+            })?;
+
+            // Build minimal tools + stores aligned with the proxy path's
+            // construction. The daemon shares the same engine shape.
+            let work_path = config_dir
+                .map(|d| d.join(&config.project.root))
+                .unwrap_or_else(|| config.project.root.clone());
+            let work_path = work_path.canonicalize().unwrap_or(work_path);
+
+            let graph_path = config.resolve_graph_path(config_dir);
+            let graph_store = open_graph_store(&graph_path)?;
+
+            let doc_path = config_dir
+                .map(|d| d.join("docs.db"))
+                .unwrap_or_else(|| PathBuf::from(".muninn/docs.db"));
+            let doc_store = open_doc_store(&doc_path)?;
+
+            let tools: Arc<dyn muninn_rlm::ToolEnvironment> =
+                Arc::new(create_tools(&work_path, graph_store, doc_store));
+
+            let engine = muninn_rlm::engine::default_engine(
+                rlm_backend,
+                tools,
+                Some(config_to_rlm_budget(&config.budget)),
+                Some(work_path),
+            );
+
+            info!("daemon starting at {}", socket_path.display());
+            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+            // Forward Ctrl-C / SIGTERM to the shutdown channel so the
+            // socket gets unlinked on the way out.
+            tokio::spawn(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                let _ = shutdown_tx.send(());
+            });
+            muninn_rlm::daemon::serve(engine, &socket_path, shutdown_rx)
+                .await
+                .map_err(|e| anyhow::anyhow!("daemon: {}", e))?;
+            info!("daemon stopped");
+            Ok(())
+        }
+    }
 }
 
 /// Configuration for launching an agent with muninn proxy.

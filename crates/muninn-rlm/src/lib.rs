@@ -95,3 +95,12 @@ pub use types::{
     ExplorationMetadata, Message, MuninnConfig, Role, StopReason, ToolChoice, ToolDefinition,
     ToolResultBlock, ToolUseBlock, Usage,
 };
+
+/// Local-IPC engine daemon — server, client, and socket-path helpers.
+///
+/// Re-exports `muninn_core::daemon` so adapters consuming `muninn-rlm`
+/// (today: the binary, the proxy) reach the daemon surface without
+/// pulling `muninn-core` into their `Cargo.toml`.
+pub mod daemon {
+    pub use muninn_core::daemon::*;
+}

@@ -16,6 +16,7 @@
 //! MCP wire (between Claude Code and the MCP server), so changing them
 //! later is expensive.
 
+pub mod daemon;
 pub mod error;
 pub mod llm;
 pub mod mcp;

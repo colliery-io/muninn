@@ -17,7 +17,15 @@ tracing = { workspace = true }
 # JSON Schema generation for the MCP tool surface. Kept here so the
 # schemas can be derived from the same Rust types they describe.
 schemars = "0.8"
+# Daemon server + client over Unix sockets. Subset of features kept
+# small on purpose; downstream crates pull more as needed.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "macros", "time", "fs"] }
+# Stable hash for the repo-scoped socket path.
+sha2 = "0.10"
+# Path expansion for $XDG_RUNTIME_DIR / $TMPDIR discovery.
+dirs = "5"
 
 [dev-dependencies]
 tokio = { workspace = true }
 serde_json = { workspace = true }
+tempfile = "3"
