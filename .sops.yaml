@@ -26,11 +26,4 @@ creation_rules:
   - path_regex: tests/secrets/.*\.enc\.(ya?ml|json|toml)$
     encrypted_regex: ^(.*_KEY|.*_TOKEN|.*_SECRET|.*_PASSWORD)$
     age:
-      # TODO: replace this placeholder with real recipient pubkeys,
-      # one per line. Format:
-      #   - <age1...>  # <human-readable owner>
-      # The placeholder below is non-functional (it's a syntactically
-      # valid age1 string but no one holds the private key) — see the
-      # onboarding section in tests/secrets/README.md for how to
-      # bootstrap the first real recipient.
-      - age1placeholderpubkeyreplacemebeforeencryptinganyrealsecretz0  # placeholder — replace before first use
+      - age1tp700tygysjl2txjrpphsqdangadjkd4vj38a470lvad2hhvee2s7apl7w  # dstorey
