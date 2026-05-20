@@ -190,7 +190,21 @@ def test_uat(name=None):
     repo_root = _repo_root()
     secrets_file = repo_root / "tests" / "secrets" / "uat.enc.yaml"
 
-    cargo_cmd = ["cargo", "test", "--workspace", "--", "--ignored", "--nocapture"]
+    # UAT test crates live in dedicated test binaries named `uat`. We
+    # target them explicitly rather than `--workspace -- --ignored` so
+    # we don't accidentally pull in pre-existing `#[ignore]`'d tests
+    # (e.g. muninn-graph's network-dependent doc indexers, which fail
+    # for unrelated reasons in this run).
+    #
+    # Extend this list when adding new UAT targets — e.g. an MCP
+    # subprocess UAT in `crates/muninn-rlm/tests/uat.rs`.
+    uat_targets = [
+        ("muninn", "uat"),
+    ]
+    cargo_cmd = ["cargo", "test"]
+    for pkg, target in uat_targets:
+        cargo_cmd.extend(["-p", pkg, "--test", target])
+    cargo_cmd.extend(["--", "--ignored", "--nocapture"])
     if name:
         cargo_cmd.insert(-2, name)  # before the `--`
 
