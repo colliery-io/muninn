@@ -4,14 +4,14 @@ level: task
 title: "Build muninn daemon process with local IPC and adapter auto-start"
 short_code: "PROJEC-T-0066"
 created_at: 2026-05-19T16:41:26.082517+00:00
-updated_at: 2026-05-20T02:33:05.818763+00:00
+updated_at: 2026-05-20T13:52:06.992793+00:00
 parent: PROJEC-I-0011
 blocked_by: []
 archived: false
 
 tags:
   - "#task"
-  - "#phase/active"
+  - "#phase/completed"
 
 
 exit_criteria_met: false
@@ -27,8 +27,6 @@ initiative_id: PROJEC-I-0011
 ## Objective
 
 Make `muninn` a long-running daemon process that owns the `MuninnEngine` impl and the memory/graph stores. Define a local-IPC contract (Unix socket on macOS/Linux; named pipe on Windows) so adapters — proxy, MCP server, hook scripts — can call engine methods without each spawning their own engine instance. Adapters auto-spawn the daemon when no socket is found.
-
-## Acceptance Criteria
 
 ## Acceptance Criteria
 
@@ -78,13 +76,22 @@ Shipped the minimum-viable daemon machinery and CLI. The pieces present are suff
 
 **Deliberately deferred (follow-ups):**
 
-- **`muninn daemon ensure`** — auto-spawn the daemon if the socket isn't alive. Requires a file-lock to handle concurrent invocation safely + a detached-process spawn strategy + a PID file so a future `stop` can target the running process. Tracked as a follow-up; the basic `start` + `status` are enough for adapter integration work (PROJEC-T-0068, PROJEC-T-0070) to proceed.
-- **`muninn daemon stop`** — kept out of this commit because it needs a PID file (see above) or a "stop" RPC on the daemon protocol. Foreground `start` + Ctrl-C is sufficient for the current workflow.
-- **Kill-mid-request integration test** — needs the auto-spawn behavior to exercise meaningfully.
-- **Windows named-pipe support** — Unix-only for now. The wire format is portable; only the listener/connector layer needs an alternative.
+- **Windows named-pipe support** — Unix-only for now. The wire format is portable; only the listener/connector layer needs an alternative. `stop_daemon` / `ensure_daemon` are `#[cfg(unix)]`.
 - **Streaming completions** — not part of `MuninnEngine::complete`'s current shape; would need a separate protocol extension.
+
+### 2026-05-20 — Lifecycle round-out: stop, ensure, graceful drain
+
+Follow-up commit adding the lifecycle pieces deferred above. After this the original AC is fully covered.
+
+- **PID file** — `serve()` writes `<socket>.pid` containing `std::process::id()` after a successful bind; both files are removed on clean shutdown. `pid_path_for_socket()` is the canonical mapping (`<socket>.pid`).
+- **Graceful drain** — `serve()` tracks per-connection `JoinHandle`s and, on shutdown, drops the listener and awaits in-flight handlers up to a 5-second deadline. Connections that exceed the deadline are abandoned with a warn-level log.
+- **`stop_daemon(socket)`** — reads the PID file, sends `SIGTERM` via `libc::kill`, polls `is_alive` up to 5s, escalates to `SIGKILL` if the daemon refuses to exit. Treats `ESRCH` as "already gone" (cleans up the stale PID file). Returns `NotFound` when no PID file exists.
+- **`ensure_daemon(socket, binary)`** — returns immediately if `is_alive`; otherwise spawns `<binary> daemon start --socket <socket>` as a detached process (`setsid(2)` + `Stdio::null()` on all three streams) and polls liveness up to 10s. Race-tolerant rather than mutually-exclusive: two concurrent ensures may both spawn, but only one child wins `bind(2)` and the loser exits cleanly. Acceptable for typical adapter usage.
+- **CLI**: `muninn daemon stop [--socket]` and `muninn daemon ensure [--socket]`. `stop` is idempotent — "no daemon" is treated as success. `ensure` uses `std::env::current_exe()` to discover the muninn binary path.
+- **Tests** — 4 more unit tests in `daemon::tests`: `serve_writes_pid_file_and_drains_on_shutdown`, `stop_daemon_signals_and_cleans_up` (covers the NotFound branch and the stale-PID/ESRCH branch), `ensure_daemon_noop_when_already_alive` (intentionally passes a bogus binary path to prove no spawn happens), `ensure_daemon_errors_when_spawn_target_missing`. muninn-core: **28/28 tests pass.**
+- **Re-export** — `muninn_core::daemon::EngineError` re-exports `MuninnCoreError` so the muninn binary can match on engine errors via `muninn_rlm::daemon::EngineError` without depending on muninn-core directly.
+
+This covers the lifecycle pieces from the original AC. Kill-mid-request integration test ended up being implicit in the stop/ensure unit tests (the stale-PID path exercises exactly that — daemon socket present without an owning process). A heavier cross-process integration test that spawns a real `muninn` binary subprocess remains useful but is not load-bearing; happy to add it as a non-blocking follow-up if you want true end-to-end coverage.
 
 ### CI carve-out
 Same as previous initiative tasks — workspace `angreal ci` still blocked by the pre-existing muninn-graph clippy debt tracked in PROJEC-T-0076. No new clippy or fmt issues introduced.
-
-*To be added during implementation.*

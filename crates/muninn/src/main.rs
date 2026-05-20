@@ -235,6 +235,20 @@ enum DaemonCommand {
         #[arg(long)]
         socket: Option<PathBuf>,
     },
+    /// Stop the daemon associated with the socket path. Sends SIGTERM
+    /// and escalates to SIGKILL if it doesn't exit within a few seconds.
+    Stop {
+        /// Override the socket path (see `start --socket`).
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+    /// Make sure a daemon is alive at the socket path, spawning one
+    /// (detached) if not. Idempotent.
+    Ensure {
+        /// Override the socket path (see `start --socket`).
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
 }
 
 /// Subcommands for documentation management.
@@ -1591,6 +1605,32 @@ async fn run_daemon_command(
             } else {
                 println!("dead\t{}", path.display());
             }
+            Ok(())
+        }
+        DaemonCommand::Stop { socket } => {
+            let path = resolve_daemon_socket(socket, config_dir);
+            match muninn_rlm::daemon::stop_daemon(&path).await {
+                Ok(()) => {
+                    info!("daemon stopped ({})", path.display());
+                    Ok(())
+                }
+                Err(muninn_rlm::daemon::EngineError::NotFound(msg)) => {
+                    // Treat "no daemon" as success — `stop` is supposed
+                    // to leave the system in a "daemon not running" state.
+                    info!("no daemon to stop: {}", msg);
+                    Ok(())
+                }
+                Err(e) => Err(anyhow::anyhow!("daemon stop: {}", e)),
+            }
+        }
+        DaemonCommand::Ensure { socket } => {
+            let path = resolve_daemon_socket(socket, config_dir);
+            let exe = std::env::current_exe()
+                .map_err(|e| anyhow::anyhow!("locate muninn binary: {}", e))?;
+            muninn_rlm::daemon::ensure_daemon(&path, &exe)
+                .await
+                .map_err(|e| anyhow::anyhow!("daemon ensure: {}", e))?;
+            info!("daemon alive at {}", path.display());
             Ok(())
         }
         DaemonCommand::Start { socket } => {

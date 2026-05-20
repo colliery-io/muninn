@@ -24,6 +24,10 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", 
 sha2 = "0.10"
 # Path expansion for $XDG_RUNTIME_DIR / $TMPDIR discovery.
 dirs = "5"
+# POSIX `kill(2)` for `daemon stop`. Pulled in only for the Unix-only
+# daemon path; no MSVC-side code uses it.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tokio = { workspace = true }
