@@ -1874,16 +1874,27 @@ async fn run_hook_submit(config: &Config, config_dir: Option<&std::path::Path>) 
 const SUBMIT_RLM_INSTRUCTION: &str = "\
 [muninn turn-start exploration]\n\
 \n\
-You are answering this user prompt on behalf of muninn so the \
-downstream agent (Claude Code) can deliver the answer without \
-re-exploring the codebase. Investigate the repo as needed and \
-produce a complete, action-ready answer.\n\
+You are priming the downstream agent (Claude Code) with the code \
+context it needs to answer this user prompt. You only get one \
+shot — your answer goes straight into the agent's conversation \
+and stays there for the whole session, so include enough \
+substance that follow-up turns can work from it without you. \
+The agent has no way to call you again for this prompt; if it \
+needs a fresh exploration later it will re-trigger you with a \
+new user prompt (often with `@muninn explore`).\n\
 \n\
-Constraints:\n\
-- Cite specific file paths and line numbers when relevant.\n\
-- If the prompt asks for code changes, include the concrete edit \
-  plan (file path + the diff or the replacement snippet).\n\
-- Keep the final answer focused and under ~800 tokens.\n\
+Front-load substance over cleverness:\n\
+- Quote actual code (not just file paths). Verbatim snippets \
+  with surrounding context beat references that the agent has \
+  to chase.\n\
+- Cite file paths and line numbers for each snippet so the \
+  agent can navigate when it needs to verify.\n\
+- If the prompt asks for code changes, include the concrete \
+  edit plan: file path + the diff or the replacement snippet \
+  inline.\n\
+- It's fine to over-include relevant context; the agent's \
+  follow-up turns will discard what they don't need.\n\
+- Keep the answer focused and under ~1200 tokens.\n\
 - End with FINAL(<the complete answer>).";
 
 async fn submit_inner(
@@ -1994,21 +2005,31 @@ async fn submit_inner(
         return Ok(HookResponse::Passthrough);
     }
 
-    // Answer-shaped framing: tell the downstream agent that muninn
-    // has done the work. The wording softens what was originally a
-    // hard "Do NOT re-grep" directive — that came across as
-    // overbearing in live use and discouraged Claude from doing
-    // appropriate verification when the inject was approximate.
-    // The framing now offers the answer as a starting point and
-    // leaves verification judgment to the downstream agent.
+    // Answer-shaped framing: muninn primes the conversation with
+    // code context for this turn. The contract is explicit:
+    //   - This is a one-shot priming dump, not a re-callable tool.
+    //   - The answer persists in the agent's context for the whole
+    //     session, so follow-up turns work from what's already here.
+    //   - When a fresh exploration is genuinely warranted, the user
+    //     (or the agent reasoning on the user's behalf) re-triggers
+    //     with `@muninn explore <prompt>`.
+    //   - Quality caveats: file paths + verbatim snippets are
+    //     reliable; line numbers may drift by a few lines.
     let block = format!(
         "─── muninn turn-start answer ───\n\
-         Muninn explored this repo on a local model and produced the \
-         answer below. Prefer it as your starting point rather than \
-         re-doing the same exploration — line numbers may be \
-         approximate, but file paths, structural claims, and verbatim \
-         code snippets are reliable. Verify what you'd reasonably \
-         double-check before acting; skip what you wouldn't.\n\
+         Muninn primed this turn with the code context below. Prefer \
+         it as your starting point rather than re-doing the same \
+         exploration — file paths, structural claims, and verbatim \
+         code snippets are reliable; line numbers may be approximate. \
+         Verify what you'd reasonably double-check before acting; \
+         skip what you wouldn't.\n\
+         \n\
+         Scope: this priming is one-shot per user turn. It lives in \
+         your context for the rest of the session — follow-up turns \
+         should work from what's already here using your normal \
+         tools, and the user can re-trigger muninn explicitly with \
+         `@muninn explore <prompt>` when fresh exploration is \
+         warranted.\n\
          \n\
          {answer}\n\
          ─────────────────────────────────"

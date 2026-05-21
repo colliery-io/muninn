@@ -351,6 +351,13 @@ fn submit_injects_answer_envelope_for_code_question() {
         ctx.contains("Prefer it as your starting point"),
         "additionalContext missing starting-point steer: {ctx:?}"
     );
+    // Also pin the one-shot contract — the agent needs to know the
+    // inject doesn't recur unless the user re-triggers, otherwise
+    // it might wait for muninn on follow-up turns or duplicate work.
+    assert!(
+        ctx.contains("one-shot") && ctx.contains("@muninn explore"),
+        "additionalContext missing one-shot priming + re-trigger guidance: {ctx:?}"
+    );
     // The answer body should at least mention the actual symbol the
     // prompt asked about — proves the RLM produced something
     // substantive rather than a stub.
