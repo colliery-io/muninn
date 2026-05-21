@@ -51,9 +51,14 @@ curl -fsSL https://raw.githubusercontent.com/colliery-io/muninn/main/install.sh 
 # Or from source (Rust 1.85+, workspace edition 2024):
 git clone https://github.com/colliery-io/muninn.git
 cd muninn
-cargo build --release
-cargo install --path crates/muninn
+cargo install --path crates/muninn --locked
 ```
+
+`--locked` is important: it tells cargo to use the committed
+`Cargo.lock` rather than re-resolving dependencies fresh. Without
+it you may pick up newer upstream patch releases than what muninn
+has been tested against (some have published breaking changes
+within a `0.x.y` line).
 
 Verify with `muninn --version`. The installer drops the binary in `~/.local/bin/`; make sure that's on your `PATH`.
 
@@ -115,11 +120,13 @@ Use `--dry-run` to preview without writing. Roll back with `muninn uninstall-cc 
 
 ### 2. Install the UserPromptSubmit plugin
 
-From inside a Claude Code session in this repo:
+Local plugins in Claude Code are loaded with the `--plugin-dir` flag at session start. Restart CC pointing at the plugin source:
 
+```bash
+claude --plugin-dir /absolute/path/to/muninn/plugins/muninn-cc
 ```
-/plugin add-source ./plugins/muninn-cc
-```
+
+(Use an absolute path. After the session is running, `/reload-plugins` picks up edits without a restart. There is currently no slash command to add a local plugin to a session that's already started.)
 
 The plugin's UserPromptSubmit hook fires once per user turn: a cheap router model decides whether the prompt needs exploration; if it does, muninn drives its recursive exploration loop on the configured local/cheap backend and injects the result as `additionalContext`, framed as the answer for Claude to deliver. **Failure mode is always silent passthrough** — the hook never blocks the user's turn. See [`plugins/muninn-cc/README.md`](plugins/muninn-cc/README.md).
 

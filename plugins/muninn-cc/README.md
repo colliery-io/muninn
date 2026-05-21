@@ -44,9 +44,27 @@ testing failure modes.
 
 ## Installation
 
-The recommended path is the `muninn install-cc` CLI. Until then,
-point Claude Code at the plugin directly by adding this repo as a
-local plugin source.
+Two pieces:
+
+1. **MCP side** — `muninn install-cc` (in the repo root) writes the
+   muninn entry into `.mcp.json` so CC sees the `search_code` /
+   `query_graph` tools.
+2. **Hook side** — restart Claude Code with `--plugin-dir` pointing
+   at this directory:
+
+   ```bash
+   claude --plugin-dir /absolute/path/to/muninn/plugins/muninn-cc
+   ```
+
+   Use an absolute path. There is currently no slash command to add
+   a local plugin to an already-running CC session; you must restart
+   with the flag. After load, edits to `hooks.json` /
+   `user-prompt-submit.sh` can be picked up live with `/reload-plugins`.
+
+If you want to share this plugin with teammates, repackage it as a
+plugin marketplace and use `/plugin marketplace add` + `/plugin
+install`. The local-directory flow above is for development and
+single-user installs.
 
 ## Layout
 

@@ -1,7 +1,7 @@
 {
   "name": "muninn-cc",
   "version": "0.0.1",
-  "description": "Augment Claude Code's Grep/Read/Glob tool calls with muninn's persistent context. Talks to a local muninn daemon and either passes the call through, attaches Muninn context, or rewrites the call to a smarter engine method.",
+  "description": "Pre-answer each user prompt with muninn's recursive exploration on a cheap local model. UserPromptSubmit hook routes the prompt through a local muninn daemon: a cheap router decides whether exploration is needed, and on rlm the recursive engine produces a complete answer that is injected as additionalContext for Claude to deliver. Silent passthrough on any failure.",
   "author": {
     "name": "muninn"
   },
