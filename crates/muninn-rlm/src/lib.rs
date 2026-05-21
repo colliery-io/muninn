@@ -19,7 +19,6 @@ pub mod graph_tools;
 pub mod groq;
 pub mod mcp;
 pub mod mcp_engine_server;
-pub mod memory_tools;
 pub mod oauth;
 pub mod ollama;
 pub mod passthrough;
@@ -61,10 +60,6 @@ pub use graph_tools::{
 };
 pub use groq::{GroqBackend, GroqConfig};
 pub use mcp::{McpServerConfig, RlmServerHandler, run_mcp_server};
-pub use memory_tools::{
-    DeleteMemoryTool, InMemoryStore, ListMemoriesTool, MemoryEntry, MemoryStore, QueryMemoryTool,
-    SearchMemoryTool, SharedMemoryStore, StoreMemoryTool, create_memory_tools,
-};
 pub use oauth::{
     OAuthConfig, OAuthTokens, PkceChallenge, build_authorization_url, exchange_code_for_tokens,
     generate_state, parse_code_state,

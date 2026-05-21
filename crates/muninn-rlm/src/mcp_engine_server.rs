@@ -1,9 +1,9 @@
 //! MCP server backed by [`MuninnEngine`].
 //!
 //! Exposes the curated engine surface defined by
-//! [`muninn_core::tool_schemas`] (PROJEC-T-0067) — `search_code`,
-//! `query_graph`, `search_docs` — over the Model
-//! Context Protocol stdio transport. Each tool call dispatches to the
+//! [`muninn_core::tool_schemas`] — `search_code` and `query_graph` —
+//! over the Model Context Protocol stdio transport.
+//! Each tool call dispatches to the
 //! matching trait method on the wrapped engine; the engine is
 //! typically a [`muninn_core::daemon::DaemonClient`] connected to a
 //! running `muninn daemon` process.
@@ -34,7 +34,7 @@ use tracing::info;
 
 use muninn_core::{
     SharedEngine, tool_schemas,
-    types::{DocsQuery, GraphQuery, SearchQuery},
+    types::{GraphQuery, SearchQuery},
 };
 
 use crate::error::{Result, RlmError};
@@ -152,16 +152,6 @@ impl ServerHandler for EngineServerHandler {
                         "query_graph arguments: {e}"
                     ))),
                 },
-                "search_docs" => match serde_json::from_value::<DocsQuery>(args) {
-                    Ok(q) => match self.engine.search_docs(q).await {
-                        Ok(r) => serde_json::to_value(r)
-                            .map_err(|e| RlmError::Serialization(e.to_string())),
-                        Err(e) => Err(RlmError::ToolExecution(e.to_string())),
-                    },
-                    Err(e) => Err(RlmError::InvalidRequest(format!(
-                        "search_docs arguments: {e}"
-                    ))),
-                },
                 unknown => Err(RlmError::InvalidRequest(format!("unknown tool: {unknown}"))),
             };
 
@@ -185,8 +175,8 @@ pub async fn run_engine_mcp_server(engine: SharedEngine) -> Result<()> {
             version: env!("CARGO_PKG_VERSION").to_string(),
             title: Some("Muninn engine".to_string()),
             description: Some(
-                "Privacy-first recursive context gateway. Exposes search_code, \
-                 query_graph, and search_docs over MCP."
+                "Privacy-first recursive context gateway. Exposes search_code \
+                 and query_graph over MCP."
                     .to_string(),
             ),
             icons: vec![],
@@ -230,10 +220,7 @@ pub async fn run_engine_mcp_server(engine: SharedEngine) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use muninn_core::types::{
-        DocsResult, ExploreRequest, ExploreResult, GraphResult, MemoryHit, MemoryItem, MemoryQuery,
-        SearchHit, SearchResult,
-    };
+    use muninn_core::types::{ExploreRequest, ExploreResult, GraphResult, SearchHit, SearchResult};
     use muninn_core::{
         CompletionRequest, CompletionResponse, MuninnEngine, error::Result as CoreResult,
     };
@@ -265,15 +252,6 @@ mod tests {
                 "explore not stubbed",
             ))
         }
-        async fn recall_memory(&self, _q: MemoryQuery) -> CoreResult<Vec<MemoryHit>> {
-            Ok(vec![])
-        }
-        async fn record_memory(&self, _i: MemoryItem) -> CoreResult<()> {
-            Ok(())
-        }
-        async fn search_docs(&self, _q: DocsQuery) -> CoreResult<DocsResult> {
-            Ok(DocsResult { hits: vec![] })
-        }
         async fn query_graph(&self, _q: GraphQuery) -> CoreResult<GraphResult> {
             Ok(GraphResult {
                 nodes: vec![],
@@ -294,9 +272,9 @@ mod tests {
         let names: Vec<&'static str> = tool_schemas().iter().map(|s| s.name).collect();
         assert!(names.contains(&"search_code"));
         assert!(names.contains(&"query_graph"));
-        assert!(names.contains(&"search_docs"));
-        // recall_memory is intentionally absent in v1.
-        assert!(!names.contains(&"recall_memory"));
+        // search_docs intentionally removed from the agent-facing
+        // surface in v1; see muninn-core/src/mcp.rs design notes.
+        assert!(!names.contains(&"search_docs"));
         // Sanity: keep the handler alive in the test to ensure
         // construction works.
         let _h = handler();

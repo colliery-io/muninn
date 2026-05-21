@@ -35,7 +35,7 @@ Muninn ships **two ways** to plug into your agent. They share the same engine; p
 
 | Surface | When to use | What it gives you |
 |---|---|---|
-| **Hook + MCP (Claude Code)** | You're using Claude Code (the primary recommendation). | A PreToolUse hook that augments / rewrites Grep / Read / Glob calls, a UserPromptSubmit hook that pre-loads project context once per user turn via a local model, and an MCP server exposing `search_code`, `query_graph`, `search_docs`. Backed by a single local daemon. Sanctioned by CC's own extension points. |
+| **Hook + MCP (Claude Code)** | You're using Claude Code (the primary recommendation). | A UserPromptSubmit hook that pre-answers each user prompt via a cheap local model and injects the result, plus an MCP server exposing `search_code`, `query_graph`, `search_docs`. Backed by a single local daemon. Sanctioned by CC's own extension points. |
 | **Proxy (everyone else)** | Cursor / Continue / Aider / any OpenAI- or Anthropic-compatible client. | A drop-in HTTP proxy that intercepts requests and routes them through a recursive exploration engine when appropriate. Same engine, different adapter. |
 
 See [ADR-0003](.metis/adrs/PROJEC-A-0003.md) for the rationale behind keeping both.
@@ -98,7 +98,7 @@ muninn install-cc --global
 
 Use `--dry-run` to preview without writing. The corresponding uninstall is `muninn uninstall-cc [--global]`.
 
-### 2. Install the PreToolUse plugin
+### 2. Install the UserPromptSubmit plugin
 
 From inside a Claude Code session in this repo:
 
@@ -106,23 +106,7 @@ From inside a Claude Code session in this repo:
 /plugin add-source ./plugins/muninn-cc
 ```
 
-The plugin's PreToolUse hook on Grep / Read / Glob lets muninn either pass the call through, attach a Muninn-context block (related symbols, callers, prior memory), or rewrite the call to a smarter engine method. **Failure mode is always silent passthrough** — the hook never blocks your tool call. See [`plugins/muninn-cc/README.md`](plugins/muninn-cc/README.md).
-
-### 3. (Optional) Tune the decision model
-
-The hot path through the hook fires per Grep / Read / Glob, so model choice matters. By default it inherits the `[default]` provider/model. To override:
-
-```toml
-# .muninn/config.toml
-[hook_decision]
-provider = "groq"
-model = "llama-3.1-8b-instant"
-
-[groq]
-api_key = "gsk_..."  # or use GROQ_API_KEY env var
-```
-
-See [`docs/migration-proxy-to-hook.md`](docs/migration-proxy-to-hook.md) for benchmarks and tuning guidance.
+The plugin's UserPromptSubmit hook fires once per user turn: a cheap router model decides whether the prompt needs exploration; if it does, muninn drives its recursive exploration loop on the configured local/cheap backend and injects the result as `additionalContext`, framed as the answer for Claude to deliver. **Failure mode is always silent passthrough** — the hook never blocks the user's turn. See [`plugins/muninn-cc/README.md`](plugins/muninn-cc/README.md).
 
 ### Available MCP tools
 
@@ -239,7 +223,7 @@ Muninn stores data in `.muninn/` within your project:
 
 ### Tiered config
 
-`[default]` is the baseline. `[router]`, `[rlm]`, and `[hook_decision]` each accept optional `provider` / `model` overrides; unset fields inherit from `[default]`. The minimal config is empty — defaults handle the rest.
+`[default]` is the baseline. `[router]` and `[rlm]` each accept optional `provider` / `model` overrides; unset fields inherit from `[default]`. The minimal config is empty — defaults handle the rest.
 
 Worked example tuning for cost/quality:
 
@@ -256,11 +240,6 @@ model = "gemma4:9b"
 # Bigger model for deep recursive exploration. Overrides both.
 provider = "anthropic"
 model = "claude-haiku-4-5-20251001"
-
-[hook_decision]
-# Hot path through the Claude Code hook. Smaller model = lower latency.
-provider = "groq"
-model = "llama-3.1-8b-instant"
 
 [anthropic]
 api_key = "sk-..."
@@ -297,18 +276,17 @@ ollama pull gemma4:31b
 ## How It Works
 
 ```
-┌──────────────────────┐                ┌────────────────────┐
-│  Claude Code         │   PreToolUse   │ muninn-cc plugin   │
-│                      │ ────hook────▶ │  pre-tool-use.sh    │
-│                      │   tools/list  └────────┬───────────┘
-│                      │ ────MCP─────┐          │ shells out
-└──────────────────────┘             │          ▼
-                                     │   ┌───────────────┐
-┌──────────────────────┐             │   │  muninn       │
-│  Cursor / Continue / │             │   │  hook decide  │
-│  Aider / custom      │             │   └──────┬────────┘
-│  OpenAI-compatible   │ ───HTTP───▶ │          │
-└──────────────────────┘             ▼          ▼
+┌──────────────────────┐  UserPromptSubmit  ┌─────────────────────────┐
+│  Claude Code         │ ─────hook────────▶ │ muninn-cc plugin        │
+│                      │     tools/list     │ user-prompt-submit.sh   │
+│                      │ ──────MCP───────┐  └────────────┬────────────┘
+└──────────────────────┘                 │               │ shells out
+                                         │               ▼
+┌──────────────────────┐                 │     ┌──────────────────┐
+│  Cursor / Continue / │                 │     │  muninn          │
+│  Aider / custom      │                 │     │  hook submit     │
+│  OpenAI-compatible   │ ─────HTTP─────▶ │     └────────┬─────────┘
+└──────────────────────┘                 ▼              ▼
                             ┌──────────────────────────┐
                             │  muninn daemon           │
                             │   ┌─────────────────┐    │
@@ -328,12 +306,8 @@ ollama pull gemma4:31b
                             └──────────────────────────┘
 ```
 
-- **Hook + MCP**: per-tool-call decisions made by a small LLM; augmentation pulled retrieval-only from the daemon's stores; recursive exploration only when explicitly invoked.
+- **Hook + MCP**: once per user turn, a cheap router decides whether muninn should explore; on rlm, the recursive engine runs on the configured local backend and the result is injected as the answer for Claude to deliver.
 - **Proxy**: HTTP intercept routes each chat-completions request through the same engine — same MuninnEngine trait, same daemon, just a different adapter.
-
-## Migrating from the proxy-only setup
-
-If you've been using muninn-as-proxy and want to add the Claude Code hook + MCP path, see **[`docs/migration-proxy-to-hook.md`](docs/migration-proxy-to-hook.md)**. Short version: both surfaces are first-class — you can run them in parallel.
 
 ## License
 

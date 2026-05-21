@@ -26,9 +26,8 @@ pub use error::{MuninnCoreError, Result};
 pub use llm::{CompletionRequest, CompletionResponse};
 pub use mcp::{McpToolSchema, SchemaStability, tool_schemas};
 pub use types::{
-    DocsHit, DocsQuery, DocsResult, ExploreRequest, ExploreResult, GraphEdge, GraphNode,
-    GraphQuery, GraphQueryKind, GraphResult, MemoryHit, MemoryItem, MemoryQuery, SearchHit,
-    SearchQuery, SearchResult,
+    ExploreRequest, ExploreResult, GraphEdge, GraphNode, GraphQuery, GraphQueryKind, GraphResult,
+    SearchHit, SearchQuery, SearchResult,
 };
 
 use std::sync::Arc;
@@ -65,19 +64,6 @@ pub trait MuninnEngine: Send + Sync {
     /// point — adapters should expose it only where bounded budget makes
     /// sense.
     async fn explore(&self, request: ExploreRequest) -> Result<ExploreResult>;
-
-    /// Look up prior notes/decisions/observations that the engine has
-    /// stored about this repo. Used by the hook to attach context to
-    /// implicit tool calls.
-    async fn recall_memory(&self, query: MemoryQuery) -> Result<Vec<MemoryHit>>;
-
-    /// Persist a new memory item (a fact, a decision, an observation).
-    /// Called by the engine itself during exploration, and by the hook
-    /// when it observes something worth remembering.
-    async fn record_memory(&self, item: MemoryItem) -> Result<()>;
-
-    /// Search indexed library documentation. Returns ranked chunks.
-    async fn search_docs(&self, query: DocsQuery) -> Result<DocsResult>;
 
     /// Query the code graph (callers, callees, defines, references, …)
     /// for a given symbol or location.

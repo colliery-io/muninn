@@ -4,7 +4,6 @@
 //! providing intelligent request routing and deep context exploration.
 
 mod config;
-mod hook;
 mod install;
 mod session;
 
@@ -121,6 +120,9 @@ fn create_backend_from_config(
             if let Some(k) = api_key {
                 ollama_config = ollama_config.with_api_key(k);
             }
+            if let Some(r) = config.ollama.max_retries {
+                ollama_config = ollama_config.with_max_retries(r);
+            }
             Ok(Some(Arc::new(OllamaBackend::new(ollama_config)?)))
         }
         other => {
@@ -220,8 +222,8 @@ enum Commands {
         command: DaemonCommand,
     },
 
-    /// PreToolUse hook plumbing — the `decide` subcommand is invoked
-    /// per-tool-call by the muninn-cc plugin.
+    /// UserPromptSubmit hook plumbing — invoked once per user turn
+    /// by the muninn-cc plugin.
     Hook {
         #[command(subcommand)]
         command: HookCommand,
@@ -256,8 +258,8 @@ enum Commands {
     /// Run a stdio MCP server backed by the muninn engine.
     ///
     /// Auto-ensures the daemon is running, connects a client, and
-    /// exposes the curated engine tool set (search_code, query_graph,
-    /// recall_memory, search_docs) over the Model Context Protocol.
+    /// exposes the curated engine tool set (search_code, query_graph)
+    /// over the Model Context Protocol.
     /// Intended to be launched by an MCP client (e.g. Claude Code's
     /// mcp.json).
     Mcp {
@@ -309,22 +311,12 @@ enum DaemonCommand {
 /// Subcommands for Claude Code hook integration.
 #[derive(Subcommand)]
 enum HookCommand {
-    /// Read a CC PreToolUse hook-input from stdin and emit the hook
-    /// response on stdout. The muninn-cc plugin shells out to this
-    /// once per `Grep` / `Read` / `Glob` call.
-    ///
-    /// On any failure (parse, decision-model error, timeout, malformed
-    /// model output) this subcommand exits 0 with empty stdout, which
-    /// Claude Code treats as "allow original tool unchanged" — the
-    /// NFR-002 silent-passthrough contract.
-    Decide,
-
     /// Read a CC UserPromptSubmit hook-input from stdin and emit a
     /// turn-start `additionalContext` block on stdout. Fires once per
     /// user message before Claude starts, so muninn gets to pre-load
-    /// relevant project context into the agent's working set.
+    /// project context into the agent's working set on a local model.
     ///
-    /// Same silent-passthrough-on-failure contract as `decide`.
+    /// Silent-passthrough on any failure — never blocks the turn.
     Submit,
 }
 
@@ -1689,7 +1681,12 @@ max_duration_secs = 300
             if !no_ensure {
                 let exe = std::env::current_exe()
                     .map_err(|e| anyhow::anyhow!("locate muninn binary: {}", e))?;
-                muninn_rlm::daemon::ensure_daemon(&socket_path, &exe)
+                let mut extra: Vec<std::ffi::OsString> = Vec::new();
+                if let Some(d) = config_dir.as_deref() {
+                    extra.push("--config".into());
+                    extra.push(d.as_os_str().to_owned());
+                }
+                muninn_rlm::daemon::ensure_daemon_with_args(&socket_path, &exe, &extra)
                     .await
                     .map_err(|e| anyhow::anyhow!("daemon ensure: {}", e))?;
             }
@@ -1716,10 +1713,6 @@ async fn run_hook_command(
     config_dir: Option<&std::path::Path>,
 ) -> Result<()> {
     match command {
-        HookCommand::Decide => {
-            run_hook_decide(config, config_dir).await;
-            Ok(())
-        }
         HookCommand::Submit => {
             run_hook_submit(config, config_dir).await;
             Ok(())
@@ -1727,75 +1720,38 @@ async fn run_hook_command(
     }
 }
 
-/// Body of `muninn hook decide`.
+/// Resolve the daemon socket path the hook should target — the
+/// repo-scoped path that `muninn daemon ensure` would compute, so
+/// the hook and the daemon agree on where to find each other
+/// without any extra CLI plumbing.
 ///
-/// Reads Claude Code's PreToolUse hook input from stdin, asks the
-/// configured decision model whether to pass the call through, augment
-/// it, or rewrite it, and writes the corresponding hook response to
-/// stdout. The whole pipeline is bounded by a 500 ms wall-clock
-/// timeout. Every failure path falls through to a silent passthrough
-/// (return without writing anything to stdout).
-async fn run_hook_decide(config: &Config, config_dir: Option<&std::path::Path>) {
-    const HOOK_DEADLINE: std::time::Duration = std::time::Duration::from_millis(500);
-
-    let outcome = tokio::time::timeout(HOOK_DEADLINE, decide_inner(config, config_dir)).await;
-
-    let response = match outcome {
-        Ok(Ok(r)) => r,
-        Ok(Err(e)) => {
-            tracing::debug!(error = %e, "hook decide errored — passthrough");
-            HookResponse::Passthrough
-        }
-        Err(_) => {
-            tracing::debug!("hook decide timed out — passthrough");
-            HookResponse::Passthrough
-        }
-    };
-    response.write_to_stdout();
+/// `MUNINN_HOOK_TEST_SOCKET`, when set, overrides the resolved path.
+/// Used by UAT to drive the hook against an isolated tempdir daemon
+/// without needing the canonical repo-scoped socket to exist.
+fn hook_socket_path(_config: &Config, config_dir: Option<&std::path::Path>) -> PathBuf {
+    if let Some(override_path) = std::env::var_os("MUNINN_HOOK_TEST_SOCKET") {
+        return PathBuf::from(override_path);
+    }
+    let repo_root = config_dir
+        .and_then(|p| p.parent().map(PathBuf::from))
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    muninn_rlm::daemon::socket_path_for_repo(&repo_root)
 }
 
-/// CC PreToolUse hook input as we care about it. Unknown fields are
-/// tolerated so future CC additions don't break parsing.
-#[derive(serde::Deserialize)]
-struct HookInput {
-    #[serde(default)]
-    tool_name: String,
-    #[serde(default)]
-    tool_input: serde_json::Value,
-}
-
-/// Decision-model output schema. The model is asked to return JSON
-/// matching this shape; deviations fall through to passthrough.
-#[derive(serde::Deserialize, Debug)]
-struct DecisionPayload {
-    decision: String,
-    #[serde(default)]
-    augment_hint: Option<String>,
-    // `rewrite` is part of the documented schema but not honored by
-    // this iteration of the hook — we degrade to passthrough on
-    // rewrite (NFR-002) until PROJEC-T-0071 wires the augmentation
-    // path and PROJEC-T-0070 follow-up implements rewrite handling.
-    #[allow(dead_code)]
-    #[serde(default)]
-    rewrite: Option<serde_json::Value>,
-}
-
-/// What the hook tells Claude Code to do. Translated to JSON on stdout.
+/// What the hook tells Claude Code to do. Either "let the turn
+/// proceed unchanged" (Passthrough — empty stdout sentinel) or
+/// "attach this block as `additionalContext`" (Augment).
 enum HookResponse {
     Passthrough,
     Augment(String),
 }
 
 impl HookResponse {
-    /// Shorthand for the PreToolUse event — `hook decide`'s caller.
-    fn write_to_stdout(self) {
-        self.write_to_stdout_for_event("PreToolUse");
-    }
-
+    /// Serialize to CC's hook-response JSON envelope on stdout.
+    /// `event` is the CC hook event name (e.g. "UserPromptSubmit").
     fn write_to_stdout_for_event(self, event: &str) {
         use std::io::Write;
         match self {
-            // Empty stdout is CC's "allow original" sentinel.
             HookResponse::Passthrough => {}
             HookResponse::Augment(context) => {
                 let body = serde_json::json!({
@@ -1804,161 +1760,11 @@ impl HookResponse {
                         "additionalContext": context,
                     }
                 });
-                // Best-effort write; if stdout is broken the contract
-                // collapses to passthrough anyway.
                 let _ = writeln!(std::io::stdout(), "{body}");
             }
         }
     }
 }
-
-async fn decide_inner(
-    config: &Config,
-    config_dir: Option<&std::path::Path>,
-) -> Result<HookResponse> {
-    // Read stdin into a string. CC bounds the hook input size; we
-    // accept whatever it sends.
-    use tokio::io::AsyncReadExt;
-    let mut buf = String::new();
-    tokio::io::stdin()
-        .read_to_string(&mut buf)
-        .await
-        .map_err(|e| anyhow::anyhow!("read stdin: {e}"))?;
-    let input: HookInput =
-        serde_json::from_str(&buf).map_err(|e| anyhow::anyhow!("parse hook input: {e}"))?;
-
-    // Build the decision-model prompt. Tool args are truncated so the
-    // prompt stays well under our 256-token input budget.
-    let tool_args_short = {
-        let s = input.tool_input.to_string();
-        if s.len() > 400 {
-            format!("{}…(truncated)", &s[..400])
-        } else {
-            s
-        }
-    };
-    let user_prompt = format!(
-        "Tool: {}\nArgs: {}\nReply with valid JSON only.",
-        input.tool_name, tool_args_short
-    );
-
-    // Resolve provider/model via the tiered config and build a
-    // backend. If the provider needs credentials we don't have, fall
-    // through.
-    let resolved = config.resolved_hook_decision();
-    let Some(backend) =
-        create_backend_from_config(&resolved.provider, &resolved.model, config, config_dir)?
-    else {
-        anyhow::bail!(
-            "no credentials for hook_decision provider {} (model {})",
-            resolved.provider,
-            resolved.model
-        );
-    };
-
-    // Construct a single-turn, non-recursive CompletionRequest. Tight
-    // token budgets keep us inside the 500 ms wall-clock cap.
-    let request = muninn_rlm::CompletionRequest::new(
-        &resolved.model,
-        vec![muninn_rlm::Message::user(user_prompt)],
-        64,
-    )
-    .with_system(HOOK_SYSTEM_PROMPT);
-
-    let response = backend
-        .complete(request)
-        .await
-        .map_err(|e| anyhow::anyhow!("backend: {e}"))?;
-    let text = response.text();
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        anyhow::bail!("empty decision-model response");
-    }
-    // Allow either bare JSON or JSON inside a ```json block — small
-    // models often wrap output in fences.
-    let json_slice = extract_json_block(trimmed).unwrap_or(trimmed);
-    let decision: DecisionPayload = serde_json::from_str(json_slice)
-        .map_err(|e| anyhow::anyhow!("parse decision: {e} (raw={json_slice:?})"))?;
-
-    Ok(match decision.decision.as_str() {
-        "passthrough" => HookResponse::Passthrough,
-        // Augment: try the full retrieval block first
-        // (PROJEC-T-0071); fall back to the model's hint when
-        // retrieval has nothing usable; fall back to passthrough when
-        // we have neither.
-        "augment" => {
-            let socket = hook_socket_path(config, config_dir);
-            let block = hook::try_build_augment_block(
-                &socket,
-                &input.tool_name,
-                &input.tool_input,
-                decision.augment_hint.as_deref(),
-            )
-            .await
-            .unwrap_or(None);
-            match block {
-                Some(b) => HookResponse::Augment(b),
-                None => match decision.augment_hint {
-                    Some(hint) if !hint.trim().is_empty() => {
-                        HookResponse::Augment(format!("Muninn hint: {}", hint.trim()))
-                    }
-                    _ => HookResponse::Passthrough,
-                },
-            }
-        }
-        // Rewrite needs engine-call wiring beyond what T-0071 ships;
-        // degrade to passthrough per NFR-002 for now.
-        "rewrite" => HookResponse::Passthrough,
-        other => {
-            tracing::debug!(decision = other, "unknown decision — passthrough");
-            HookResponse::Passthrough
-        }
-    })
-}
-
-/// Resolve the daemon socket path the hook should target. Mirrors
-/// `resolve_daemon_socket` but doesn't take a CLI override — the hook
-/// always uses the repo-scoped path that `muninn daemon ensure` would
-/// resolve to.
-fn hook_socket_path(_config: &Config, config_dir: Option<&std::path::Path>) -> PathBuf {
-    let repo_root = config_dir
-        .and_then(|p| p.parent().map(PathBuf::from))
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    muninn_rlm::daemon::socket_path_for_repo(&repo_root)
-}
-
-/// Pull a JSON object out of a possibly-fenced model response.
-fn extract_json_block(text: &str) -> Option<&str> {
-    // Strip ```json … ``` or ``` … ``` fences if present.
-    let stripped = text
-        .strip_prefix("```json\n")
-        .or_else(|| text.strip_prefix("```\n"))
-        .and_then(|s| s.strip_suffix("\n```"));
-    if let Some(inner) = stripped {
-        return Some(inner.trim());
-    }
-    // Otherwise hunt for the first `{` and last `}` — tolerant of
-    // models that prefix the JSON with a rationale paragraph.
-    let start = text.find('{')?;
-    let end = text.rfind('}')?;
-    if end > start {
-        Some(text[start..=end].trim())
-    } else {
-        None
-    }
-}
-
-const HOOK_SYSTEM_PROMPT: &str = "\
-You are muninn's PreToolUse decision model. For each Claude Code tool call you \
-see, decide whether muninn can add value. Reply with JSON only — no prose, no \
-fences:\n\
-{\n\
-  \"decision\": \"passthrough\" | \"augment\" | \"rewrite\",\n\
-  \"rationale\": \"optional short string\",\n\
-  \"augment_hint\": \"optional hint when decision is augment\"\n\
-}\n\
-Default to \"passthrough\". Pick \"augment\" only when you can articulate a \
-specific extra thing muninn knows about this query. Never block the call.";
 
 /// CC UserPromptSubmit hook input shape. Fields we don't read are
 /// tolerated so future CC additions don't break parsing.
@@ -1981,12 +1787,23 @@ struct UserPromptInput {
 /// user's turn proceeds without muninn pre-injection.
 async fn run_hook_submit(config: &Config, config_dir: Option<&std::path::Path>) {
     // Generous outer cap. The user is already waiting for Claude's
-    // first token, so 30s of pre-exploration is acceptable when the
-    // payoff is "Claude already knows which files to touch." Still
-    // bounded so a hung daemon can't strand the turn.
-    const SUBMIT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+    // first token, and real RLM exploration on a local/cheap model
+    // regularly takes 20-60s for code-shaped questions, so 240s of
+    // pre-exploration is the realistic floor — anything tighter
+    // makes muninn silently disappear for the prompts it's most
+    // useful on. Still bounded so a hung daemon can't strand the turn.
+    //
+    // `MUNINN_HOOK_DEADLINE_MS` lets UAT shrink the cap so the
+    // timeout-backstop path can be exercised in a few seconds
+    // instead of the full default; not intended for production use.
+    const SUBMIT_DEADLINE_DEFAULT: std::time::Duration = std::time::Duration::from_secs(240);
+    let deadline = std::env::var("MUNINN_HOOK_DEADLINE_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(SUBMIT_DEADLINE_DEFAULT);
 
-    let outcome = tokio::time::timeout(SUBMIT_DEADLINE, submit_inner(config, config_dir)).await;
+    let outcome = tokio::time::timeout(deadline, submit_inner(config, config_dir)).await;
 
     let response = match outcome {
         Ok(Ok(r)) => r,
@@ -2223,7 +2040,15 @@ async fn run_daemon_command(
             let path = resolve_daemon_socket(socket, config_dir);
             let exe = std::env::current_exe()
                 .map_err(|e| anyhow::anyhow!("locate muninn binary: {}", e))?;
-            muninn_rlm::daemon::ensure_daemon(&path, &exe)
+            // Propagate --config so the spawned daemon reads the
+            // same config we did. Without this the daemon falls back
+            // to CWD-based discovery and silently disagrees.
+            let mut extra: Vec<std::ffi::OsString> = Vec::new();
+            if let Some(d) = config_dir {
+                extra.push("--config".into());
+                extra.push(d.as_os_str().to_owned());
+            }
+            muninn_rlm::daemon::ensure_daemon_with_args(&path, &exe, &extra)
                 .await
                 .map_err(|e| anyhow::anyhow!("daemon ensure: {}", e))?;
             info!("daemon alive at {}", path.display());
@@ -2264,14 +2089,19 @@ async fn run_daemon_command(
                 .unwrap_or_else(|| PathBuf::from(".muninn/docs.db"));
             let doc_store = open_doc_store(&doc_path)?;
 
+            // Keep a handle to the graph store for the engine; the
+            // tools layer needs its own clone, so split before
+            // consuming into create_tools.
+            let engine_graph_store = graph_store.clone();
             let tools: Arc<dyn muninn_rlm::ToolEnvironment> =
                 Arc::new(create_tools(&work_path, graph_store, doc_store));
 
-            let engine = muninn_rlm::engine::default_engine(
+            let engine = muninn_rlm::engine::default_engine_with_graph(
                 rlm_backend,
                 tools,
                 Some(config_to_rlm_budget(&config.budget)),
                 Some(work_path),
+                engine_graph_store,
             );
 
             info!("daemon starting at {}", socket_path.display());
@@ -2688,87 +2518,4 @@ async fn run_oauth_flow(token_manager: &FileTokenManager) -> Result<()> {
     info!("Tokens will auto-refresh when they expire (8-hour lifetime).");
 
     Ok(())
-}
-
-#[cfg(test)]
-mod hook_tests {
-    use super::*;
-
-    #[test]
-    fn extract_json_handles_bare_object() {
-        let s = r#"{"decision":"passthrough"}"#;
-        assert_eq!(extract_json_block(s), Some(s));
-    }
-
-    #[test]
-    fn extract_json_handles_json_fence() {
-        let s = "```json\n{\"decision\":\"augment\"}\n```";
-        assert_eq!(extract_json_block(s), Some(r#"{"decision":"augment"}"#));
-    }
-
-    #[test]
-    fn extract_json_handles_plain_fence() {
-        let s = "```\n{\"decision\":\"passthrough\"}\n```";
-        assert_eq!(extract_json_block(s), Some(r#"{"decision":"passthrough"}"#));
-    }
-
-    #[test]
-    fn extract_json_tolerates_prefix_prose() {
-        let s = "Here's my answer:\n{\"decision\":\"passthrough\"}\nThanks!";
-        assert_eq!(extract_json_block(s), Some(r#"{"decision":"passthrough"}"#));
-    }
-
-    #[test]
-    fn extract_json_returns_none_for_no_braces() {
-        assert_eq!(extract_json_block("nothing here"), None);
-    }
-
-    #[test]
-    fn decision_payload_parses_passthrough() {
-        let p: DecisionPayload = serde_json::from_str(r#"{"decision":"passthrough"}"#).unwrap();
-        assert_eq!(p.decision, "passthrough");
-        assert!(p.augment_hint.is_none());
-    }
-
-    #[test]
-    fn decision_payload_parses_augment_with_hint() {
-        let p: DecisionPayload =
-            serde_json::from_str(r#"{"decision":"augment","augment_hint":"recall the auth ADR"}"#)
-                .unwrap();
-        assert_eq!(p.decision, "augment");
-        assert_eq!(p.augment_hint.as_deref(), Some("recall the auth ADR"));
-    }
-
-    #[test]
-    fn decision_payload_tolerates_extra_fields() {
-        // Small models often include extra keys; we ignore them rather
-        // than failing parse.
-        let p: DecisionPayload = serde_json::from_str(
-            r#"{"decision":"passthrough","rationale":"obvious","mood":"chipper"}"#,
-        )
-        .unwrap();
-        assert_eq!(p.decision, "passthrough");
-    }
-
-    #[test]
-    fn hook_input_parses_minimal_cc_payload() {
-        let json = r#"{
-            "session_id": "abc",
-            "transcript_path": "/tmp/x.jsonl",
-            "tool_name": "Grep",
-            "tool_input": {"pattern": "fn main"}
-        }"#;
-        let input: HookInput = serde_json::from_str(json).unwrap();
-        assert_eq!(input.tool_name, "Grep");
-        assert_eq!(input.tool_input["pattern"], "fn main");
-    }
-
-    #[test]
-    fn hook_input_tolerates_missing_optional_fields() {
-        // Older or newer CC payloads might drop fields we don't read;
-        // we should still parse.
-        let input: HookInput = serde_json::from_str(r#"{"tool_name":"Read"}"#).unwrap();
-        assert_eq!(input.tool_name, "Read");
-        assert!(input.tool_input.is_null());
-    }
 }

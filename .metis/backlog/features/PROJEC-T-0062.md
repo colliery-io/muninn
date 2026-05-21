@@ -143,4 +143,6 @@ Single-line, pipe-delimited, minimal token overhead:
 
 ## Status Updates
 
-*To be added during implementation*
+### 2026-05-21 — Deferred per v1 RLM-focus decision
+
+Muninn v1 (see [[PROJEC-I-0011]] post-completion notes) positions as a recursive-language-model gateway — the agent-facing `search_docs` MCP tool was explicitly dropped from v1. This task is the natural next chapter once that scope reopens: a compressed docs-index injection is one of the "other context injection mechanisms" the v1 deferral note flags as future work. Stays in backlog until the v2 context-injection thesis is ready.

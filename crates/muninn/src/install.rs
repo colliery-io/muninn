@@ -1,13 +1,12 @@
 //! `muninn install-cc` / `muninn uninstall-cc` implementation.
 //!
 //! These subcommands register the muninn MCP server into a target
-//! Claude Code config so the agent can call `search_code`,
-//! `query_graph`, `recall_memory`, and `search_docs` over MCP. The
-//! muninn-cc plugin (PROJEC-T-0069) — which registers the PreToolUse
-//! hook — is installed separately via Claude Code's `/plugin` tooling
-//! because CC's local-plugin registration format is less standardized
-//! than its `.mcp.json` format; we print clear instructions for that
-//! step rather than poking unknown internals.
+//! Claude Code config so the agent can call `search_code` and
+//! `query_graph` over MCP. The muninn-cc plugin, which registers the
+//! UserPromptSubmit hook, is installed separately via Claude Code's
+//! `/plugin` tooling because CC's local-plugin registration format
+//! is less standardized than its `.mcp.json` format; we print clear
+//! instructions for that step rather than poking unknown internals.
 //!
 //! ## File layout
 //!
@@ -319,12 +318,12 @@ pub fn describe_uninstall(outcome: &UninstallOutcome, scope: InstallScope) -> St
 }
 
 /// Hook + plugin install notice — printed alongside the MCP summary
-/// because the PreToolUse plugin's local install is done via CC's own
-/// `/plugin` command, which we don't drive from here.
+/// because the UserPromptSubmit plugin's local install is done via
+/// CC's own `/plugin` command, which we don't drive from here.
 pub fn plugin_install_notice() -> String {
     "Plugin (muninn-cc) install:\n  \
-     The PreToolUse hook plugin at plugins/muninn-cc/ is registered via \
-     Claude Code's `/plugin` command. From a CC session in this repo, run:\n  \
+     The UserPromptSubmit hook plugin at plugins/muninn-cc/ is registered \
+     via Claude Code's `/plugin` command. From a CC session in this repo, run:\n  \
        /plugin add-source ./plugins/muninn-cc\n  \
      (Exact incantation depends on your CC version. See plugins/muninn-cc/README.md.)"
         .to_string()

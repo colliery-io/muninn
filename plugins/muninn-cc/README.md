@@ -1,26 +1,22 @@
 # muninn-cc
 
-Claude Code plugin that augments `Grep` / `Read` / `Glob` tool calls with
-muninn's persistent context.
+Claude Code plugin that pre-answers each user prompt with muninn's
+recursive exploration on a cheap local model, so Claude Code itself
+doesn't have to re-discover project context for every turn.
 
 ## What it does
 
-On every `Grep`, `Read`, or `Glob` Claude Code is about to issue, the
-plugin's PreToolUse hook hands the call to a local muninn daemon. A small
-"decision model" running inside muninn picks one of three outcomes:
+On every `UserPromptSubmit`, the plugin's hook hands the prompt to a
+local muninn daemon. A cheap router model decides whether the prompt
+needs exploration; if it does, muninn drives its recursive exploration
+loop on the configured local/cheap backend and returns the result. The
+hook injects that result as `additionalContext`, framed as the answer
+Claude should deliver — explicitly instructing Claude not to re-grep
+or re-read the codebase to discover what muninn already found.
 
-- **Passthrough** — the tool runs unchanged. No latency cost beyond the
-  decision-model call.
-- **Augment** — the tool runs normally, and muninn attaches an
-  `additionalContext` block (related symbols, callers/callees, prior
-  memory) capped at ~2 KB.
-- **Rewrite** — muninn short-circuits the original tool and returns the
-  answer from one of its engine methods (`search_code`, `query_graph`,
-  …) instead.
-
-The plugin itself is intentionally thin — a shell entry that shells out
-to the `muninn` binary. All real work happens inside muninn so updating
-the binary updates the plugin's behavior.
+The plugin itself is intentionally thin — a shell entry that shells
+out to the `muninn` binary. All real work happens inside muninn so
+updating the binary updates the plugin's behavior.
 
 ## Requirements
 
@@ -31,33 +27,30 @@ the binary updates the plugin's behavior.
   See the top-level README for the tiered-config defaults.
 
 The hook is engineered for **silent passthrough on any failure**: if
-`muninn` is missing, errors, or times out, Claude Code runs the original
-tool unchanged. The plugin never blocks the user's tool call. (See
-NFR-002 in PROJEC-I-0011.)
+`muninn` is missing, errors, or times out, Claude Code processes the
+user's prompt with no injection. The plugin never blocks the user's
+turn (NFR-002).
 
 ## Installation
 
-The recommended path is the `muninn install-cc` CLI, shipping in
-PROJEC-T-0072. Until then, point Claude Code at the plugin directly by
-adding this repo as a local plugin source.
+The recommended path is the `muninn install-cc` CLI. Until then,
+point Claude Code at the plugin directly by adding this repo as a
+local plugin source.
 
 ## Layout
 
 ```
 plugins/muninn-cc/
 ├── .claude-plugin/
-│   └── plugin.json          # plugin manifest (name, version, metadata)
+│   └── plugin.json              # plugin manifest
 ├── hooks/
-│   ├── hooks.json           # registers the PreToolUse hook on Grep|Read|Glob
-│   └── pre-tool-use.sh      # shell entry point — shells out to `muninn hook decide`
-└── README.md                # this file
+│   ├── hooks.json               # registers the UserPromptSubmit hook
+│   └── user-prompt-submit.sh    # shell entry — shells out to `muninn hook submit`
+└── README.md                    # this file
 ```
 
 ## See also
 
 - ADR-0003 — why muninn uses hooks + MCP as the primary Claude Code
   integration surface.
-- PROJEC-I-0011 — the broader hook + MCP integration initiative.
-- PROJEC-T-0070 — the `muninn hook decide` subcommand the script
-  delegates to.
-- PROJEC-T-0072 — the `muninn install-cc` installer.
+- `muninn install-cc --help` — installer for the MCP server side.

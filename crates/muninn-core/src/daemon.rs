@@ -2,12 +2,11 @@
 //!
 //! The muninn daemon owns a single [`MuninnEngine`] instance plus the
 //! underlying SQLite-backed stores, and serves engine calls over a
-//! Unix-domain socket. Adapters — the existing proxy, the future MCP
-//! server (PROJEC-T-0068), and the Claude Code hook plugin
-//! (PROJEC-T-0069+) — talk to it via a [`DaemonClient`] that itself
-//! implements [`MuninnEngine`] so callers can hold
-//! `Arc<dyn MuninnEngine>` without caring whether the implementation
-//! lives in-process or across the socket.
+//! Unix-domain socket. Adapters — the proxy, the MCP server, and the
+//! Claude Code UserPromptSubmit hook — talk to it via a
+//! [`DaemonClient`] that itself implements [`MuninnEngine`], so
+//! callers can hold `Arc<dyn MuninnEngine>` without caring whether
+//! the implementation lives in-process or across the socket.
 //!
 //! ## Wire format
 //!
@@ -26,7 +25,7 @@
 //! of the canonicalized repository root, keeping multiple muninn
 //! instances (different repos, different daemons) isolated.
 //!
-//! ## Limitations (current iteration — PROJEC-T-0066)
+//! ## Limitations (current iteration)
 //!
 //! - **Unix-only.** [`stop_daemon`] and [`ensure_daemon`] are
 //!   `#[cfg(unix)]`; Windows named-pipe + service-control support is
@@ -60,8 +59,7 @@ use crate::error::{MuninnCoreError, Result};
 pub use crate::error::MuninnCoreError as EngineError;
 use crate::llm::{CompletionRequest, CompletionResponse};
 use crate::types::{
-    DocsQuery, DocsResult, ExploreRequest, ExploreResult, GraphQuery, GraphResult, MemoryHit,
-    MemoryItem, MemoryQuery, SearchQuery, SearchResult,
+    ExploreRequest, ExploreResult, GraphQuery, GraphResult, SearchQuery, SearchResult,
 };
 use crate::{MuninnEngine, SharedEngine};
 
@@ -79,9 +77,6 @@ pub enum DaemonMethod {
     Complete,
     SearchCode,
     Explore,
-    RecallMemory,
-    RecordMemory,
-    SearchDocs,
     QueryGraph,
 }
 
@@ -392,19 +387,6 @@ async fn dispatch(engine: &SharedEngine, req: Request) -> Result<Value> {
             let q: ExploreRequest = decode(req.payload)?;
             encode(engine.explore(q).await?)
         }
-        DaemonMethod::RecallMemory => {
-            let q: MemoryQuery = decode(req.payload)?;
-            encode(engine.recall_memory(q).await?)
-        }
-        DaemonMethod::RecordMemory => {
-            let item: MemoryItem = decode(req.payload)?;
-            engine.record_memory(item).await?;
-            Ok(Value::Null)
-        }
-        DaemonMethod::SearchDocs => {
-            let q: DocsQuery = decode(req.payload)?;
-            encode(engine.search_docs(q).await?)
-        }
         DaemonMethod::QueryGraph => {
             let q: GraphQuery = decode(req.payload)?;
             encode(engine.query_graph(q).await?)
@@ -470,31 +452,6 @@ impl DaemonClient {
             ResponseResult::Err { error } => Err(error.into()),
         }
     }
-
-    async fn call_unit<P: Serialize>(&self, method: DaemonMethod, payload: P) -> Result<()> {
-        let id = self
-            .next_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let req = Request {
-            id,
-            method,
-            payload: serde_json::to_value(payload)
-                .map_err(|e| MuninnCoreError::Internal(format!("payload encode: {e}")))?,
-        };
-        let mut conn = self.conn.lock().await;
-        write_frame(&mut conn, &req).await?;
-        let resp: Response = read_frame(&mut conn).await?;
-        if resp.id != id {
-            return Err(MuninnCoreError::Internal(format!(
-                "daemon response id mismatch: expected {id}, got {}",
-                resp.id
-            )));
-        }
-        match resp.result {
-            ResponseResult::Ok { .. } => Ok(()),
-            ResponseResult::Err { error } => Err(error.into()),
-        }
-    }
 }
 
 #[async_trait]
@@ -507,15 +464,6 @@ impl MuninnEngine for DaemonClient {
     }
     async fn explore(&self, request: ExploreRequest) -> Result<ExploreResult> {
         self.call(DaemonMethod::Explore, request).await
-    }
-    async fn recall_memory(&self, query: MemoryQuery) -> Result<Vec<MemoryHit>> {
-        self.call(DaemonMethod::RecallMemory, query).await
-    }
-    async fn record_memory(&self, item: MemoryItem) -> Result<()> {
-        self.call_unit(DaemonMethod::RecordMemory, item).await
-    }
-    async fn search_docs(&self, query: DocsQuery) -> Result<DocsResult> {
-        self.call(DaemonMethod::SearchDocs, query).await
     }
     async fn query_graph(&self, query: GraphQuery) -> Result<GraphResult> {
         self.call(DaemonMethod::QueryGraph, query).await
@@ -594,16 +542,33 @@ pub async fn stop_daemon(socket_path: &Path) -> Result<()> {
 /// inherit our terminal.
 #[cfg(unix)]
 pub async fn ensure_daemon(socket_path: &Path, binary_path: &Path) -> Result<()> {
+    ensure_daemon_with_args(socket_path, binary_path, &[]).await
+}
+
+/// Like [`ensure_daemon`], but lets the caller prepend extra
+/// arguments before the `daemon start` subcommand. The intended use
+/// is propagating top-level flags such as `--config <dir>` so the
+/// spawned daemon picks up the same config the caller resolved
+/// against — without that, the child re-discovers config from its
+/// CWD and silently disagrees with the parent.
+pub async fn ensure_daemon_with_args(
+    socket_path: &Path,
+    binary_path: &Path,
+    top_level_args: &[std::ffi::OsString],
+) -> Result<()> {
     if is_alive(socket_path).await {
         return Ok(());
     }
 
-    // Spawn `<binary> daemon start --socket <socket_path>` as a
-    // detached process.
+    // Spawn `<binary> [top_level_args...] daemon start --socket <socket_path>`
+    // as a detached process.
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
     let mut cmd = Command::new(binary_path);
+    for a in top_level_args {
+        cmd.arg(a);
+    }
     cmd.arg("daemon")
         .arg("start")
         .arg("--socket")
@@ -677,15 +642,6 @@ mod tests {
         }
         async fn explore(&self, _r: ExploreRequest) -> CoreResult<ExploreResult> {
             Err(MuninnCoreError::Internal("explore not stubbed".into()))
-        }
-        async fn recall_memory(&self, _q: MemoryQuery) -> CoreResult<Vec<MemoryHit>> {
-            Ok(vec![])
-        }
-        async fn record_memory(&self, _i: MemoryItem) -> CoreResult<()> {
-            Ok(())
-        }
-        async fn search_docs(&self, _q: DocsQuery) -> CoreResult<DocsResult> {
-            Ok(DocsResult { hits: vec![] })
         }
         async fn query_graph(&self, _q: GraphQuery) -> CoreResult<GraphResult> {
             Err(MuninnCoreError::Backend("graph not stubbed".into()))

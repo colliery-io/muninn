@@ -11,7 +11,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::backend::{ContentDelta, LLMBackend, ResponseStream, StreamEvent, with_retry};
+use crate::backend::{
+    ContentDelta, LLMBackend, ResponseStream, StreamEvent, pick_model, with_retry,
+};
 use crate::error::{Result, RlmError};
 use crate::types::{
     CompletionRequest, CompletionResponse, ContentBlock, Message, Role, StopReason, Usage,
@@ -274,15 +276,20 @@ impl GroqBackend {
             Some(request.stop_sequences.clone())
         };
 
-        // Disable thinking mode for Qwen3 to get direct responses
-        let reasoning_effort = if self.config.model.contains("qwen") {
+        // Disable thinking mode for Qwen3 to get direct responses.
+        // Check the effective model (per-request override wins) so a
+        // caller pinning a non-qwen model via request.model doesn't
+        // accidentally send `reasoning_effort` to a backend that
+        // rejects it.
+        let effective_model = pick_model(&request.model, &self.config.model);
+        let reasoning_effort = if effective_model.contains("qwen") {
             Some("none".to_string())
         } else {
             None
         };
 
         GroqChatRequest {
-            model: self.config.model.clone(),
+            model: effective_model,
             messages,
             max_completion_tokens: Some(request.max_tokens),
             temperature: request.temperature,
@@ -822,7 +829,7 @@ mod tests {
     }
 
     #[test]
-    fn test_to_groq_request() {
+    fn test_to_groq_request_request_model_wins_over_default() {
         let config = GroqConfig::new("key");
         let backend = GroqBackend::new(config).unwrap();
 
@@ -830,9 +837,23 @@ mod tests {
             CompletionRequest::new("llama-3.1-8b-instant", vec![Message::user("Hello")], 100);
 
         let groq_req = backend.to_groq_request(&request);
-        assert_eq!(groq_req.model, DEFAULT_MODEL);
+        // The per-request model now wins over the backend default —
+        // this is how tier-config (router/rlm) model overrides reach
+        // the wire.
+        assert_eq!(groq_req.model, "llama-3.1-8b-instant");
         assert_eq!(groq_req.messages.len(), 1);
         assert_eq!(groq_req.messages[0].role, "user");
         assert_eq!(groq_req.max_completion_tokens, Some(100));
+    }
+
+    #[test]
+    fn test_to_groq_request_falls_back_to_default_when_request_model_empty() {
+        let config = GroqConfig::new("key");
+        let backend = GroqBackend::new(config).unwrap();
+
+        let request = CompletionRequest::new("", vec![Message::user("Hello")], 100);
+
+        let groq_req = backend.to_groq_request(&request);
+        assert_eq!(groq_req.model, DEFAULT_MODEL);
     }
 }

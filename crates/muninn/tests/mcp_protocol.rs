@@ -203,9 +203,8 @@ impl Drop for McpClient {
 
 /// Full handshake: `initialize` succeeds, the server reports its
 /// own name/version, and `tools/list` advertises the curated muninn
-/// surface (search_code / query_graph / search_docs). `recall_memory`
-/// is excluded in v1 — memory has no real write source, so
-/// advertising it would surface a tool that always returns empty.
+/// surface (search_code / query_graph). `search_docs` is
+/// deliberately gated out of v1 per the muninn-as-RLM focus.
 #[test]
 #[ignore = "UAT — MCP stdio protocol; invoke via `angreal test uat`"]
 fn mcp_initialize_and_list_tools() {
@@ -245,36 +244,37 @@ fn mcp_initialize_and_list_tools() {
         .iter()
         .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
         .collect();
-    let expected = ["search_code", "query_graph", "search_docs"];
+    let expected = ["search_code", "query_graph"];
     for want in expected {
         assert!(
             names.iter().any(|n| n == want),
             "tools/list missing {want}; got {names:?}"
         );
     }
-    // `explore` is deliberately not surfaced (PROJEC-T-0067).
+    // `explore` is deliberately not surfaced via MCP — the recursive
+    // engine is the expensive code path and an LLM planner is prone
+    // to invoking it for vague questions. See mcp.rs design notes.
     assert!(
         !names.iter().any(|n| n == "explore"),
         "explore should not be exposed via MCP, got {names:?}"
     );
-    // `recall_memory` is not surfaced in v1 — memory store has no
-    // user-facing write source so advertising it would be misleading.
+    // `search_docs` is gated out of v1 — muninn-as-RLM focus.
     assert!(
-        !names.iter().any(|n| n == "recall_memory"),
-        "recall_memory should not be exposed via MCP in v1, got {names:?}"
+        !names.iter().any(|n| n == "search_docs"),
+        "search_docs should not be exposed via MCP in v1, got {names:?}"
     );
 }
 
-/// Call `search_code` over MCP. The engine's `search_code` is still
-/// stubbed (PROJEC-T-0065 carve-out), so the response should arrive
-/// as a `CallToolResult { is_error: Some(true) }` carrying the
-/// "not yet wired" message — *not* a JSON-RPC error. The contract
-/// per `mcp_engine_server.rs` is that engine errors land in
-/// CallToolResult, not at the protocol layer.
+/// Call `search_code` over MCP and assert the engine actually walks
+/// the filesystem and returns real hits. The daemon is started
+/// against the project's own `.muninn/config.toml`, whose
+/// `project.root` resolves to the workspace root — so a search for
+/// the literal `fn main` should land on at least one Rust source
+/// file in this repo.
 #[test]
 #[ignore = "UAT — MCP stdio protocol; invoke via `angreal test uat`"]
-fn mcp_tools_call_search_code_surfaces_engine_error_as_tool_error() {
-    if skip_if_no_backend("mcp_tools_call_search_code_surfaces_engine_error_as_tool_error") {
+fn mcp_tools_call_search_code_returns_filesystem_hits() {
+    if skip_if_no_backend("mcp_tools_call_search_code_returns_filesystem_hits") {
         return;
     }
     let sock = isolated_socket();
@@ -295,29 +295,156 @@ fn mcp_tools_call_search_code_surfaces_engine_error_as_tool_error() {
         "tools/call",
         serde_json::json!({
             "name": "search_code",
-            "arguments": {"pattern": "fn main", "is_regex": false}
+            "arguments": {
+                "pattern": "fn main",
+                "is_regex": false,
+                "language": "rust",
+                "limit": 10
+            }
         }),
     );
-    // JSON-RPC success at the protocol layer.
     assert!(
         resp.get("error").is_none(),
         "expected JSON-RPC success: {resp}"
     );
     let result = &resp["result"];
-    // Tool-level error: `isError: true`.
-    assert_eq!(
-        result["isError"], true,
-        "engine error should surface as tool isError: {resp}"
-    );
-    // The text content should mention the carve-out so future
-    // engine-wiring follow-ups can confirm they replaced this path
-    // by re-running the test and seeing it pass (i.e. isError: false).
-    let content_text = result["content"][0]["text"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
+    let is_error = result
+        .get("isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     assert!(
-        content_text.contains("not yet wired") || content_text.contains("PROJEC-T-0065"),
-        "expected the not-wired-yet sentinel in the tool error text; got {content_text:?}"
+        !is_error,
+        "search_code should not surface a tool error now that it's wired: {result}"
+    );
+
+    let structured = &result["structuredContent"];
+    let hits = structured
+        .get("hits")
+        .and_then(|v| v.as_array())
+        .unwrap_or_else(|| panic!("structuredContent missing 'hits': {result}"));
+    assert!(
+        !hits.is_empty(),
+        "expected at least one `fn main` hit in this workspace: {result}"
+    );
+    let first = &hits[0];
+    assert!(
+        first
+            .get("path")
+            .and_then(|p| p.as_str())
+            .is_some_and(|p| p.ends_with(".rs")),
+        "expected a .rs path on the first hit: {first}"
+    );
+    assert!(
+        first
+            .get("snippet")
+            .and_then(|s| s.as_str())
+            .is_some_and(|s| s.contains("fn main")),
+        "expected snippet to contain `fn main`: {first}"
+    );
+}
+
+/// Call `query_graph` over MCP with `kind=callers` against a target
+/// the repo's indexed graph should know about. The test tolerates an
+/// empty graph database (fresh checkout, never indexed): in that
+/// case `nodes` is empty and we skip the substantive assertion with
+/// a breadcrumb. When the graph IS populated we assert the response
+/// shape (structuredContent with `nodes` + `edges` arrays).
+#[test]
+#[ignore = "UAT — MCP stdio protocol; invoke via `angreal test uat`"]
+fn mcp_tools_call_query_graph_returns_graph_payload() {
+    if skip_if_no_backend("mcp_tools_call_query_graph_returns_graph_payload") {
+        return;
+    }
+    let sock = isolated_socket();
+    let _daemon = DaemonGuard::start(sock.clone());
+    let mut mcp = McpClient::spawn(&sock);
+
+    let _ = mcp.request(
+        "initialize",
+        serde_json::json!({
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "uat", "version": "0.0"}
+        }),
+    );
+    mcp.notify("notifications/initialized", serde_json::json!({}));
+
+    // Ask for callers of a function we know exists in this workspace.
+    // If the graph index is empty the call should still succeed with
+    // zero nodes — the engine returns an empty result, not an error.
+    let resp = mcp.request(
+        "tools/call",
+        serde_json::json!({
+            "name": "query_graph",
+            "arguments": {
+                "target": "socket_path_for_repo",
+                "kind": "callers"
+            }
+        }),
+    );
+    assert!(
+        resp.get("error").is_none(),
+        "expected JSON-RPC success: {resp}"
+    );
+    let result = &resp["result"];
+    let is_error = result
+        .get("isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    assert!(
+        !is_error,
+        "query_graph should not surface a tool error now that it's wired: {result}"
+    );
+
+    let structured = &result["structuredContent"];
+    let nodes = structured
+        .get("nodes")
+        .and_then(|v| v.as_array())
+        .unwrap_or_else(|| panic!("structuredContent missing 'nodes' array: {result}"));
+    let edges = structured
+        .get("edges")
+        .and_then(|v| v.as_array())
+        .unwrap_or_else(|| panic!("structuredContent missing 'edges' array: {result}"));
+
+    if nodes.is_empty() {
+        eprintln!(
+            "[uat] query_graph returned empty — graph index is likely unpopulated. \
+             Skipping payload-shape assertions. (Run `muninn index` to populate.)"
+        );
+        return;
+    }
+
+    // Graph has data: the target itself should appear as a node, and
+    // every edge should reference ids that appear in nodes.
+    let node_ids: Vec<String> = nodes
+        .iter()
+        .filter_map(|n| n.get("id").and_then(|i| i.as_str()).map(String::from))
+        .collect();
+    assert!(
+        node_ids.iter().any(|n| n.contains("socket_path_for_repo")),
+        "expected target symbol in returned nodes; got {node_ids:?}"
+    );
+    for e in edges {
+        let from = e
+            .get("from")
+            .and_then(|v| v.as_str())
+            .expect("edge.from string");
+        let to = e
+            .get("to")
+            .and_then(|v| v.as_str())
+            .expect("edge.to string");
+        assert!(
+            node_ids.iter().any(|n| n == from),
+            "edge.from {from:?} not in nodes {node_ids:?}"
+        );
+        assert!(
+            node_ids.iter().any(|n| n == to),
+            "edge.to {to:?} not in nodes {node_ids:?}"
+        );
+    }
+    eprintln!(
+        "[uat] query_graph: {n} nodes, {e} edges",
+        n = nodes.len(),
+        e = edges.len()
     );
 }

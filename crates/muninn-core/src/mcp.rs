@@ -13,18 +13,15 @@
 //! - `explore` (recursive exploration) is **not** exposed via MCP. The
 //!   recursive engine is the expensive code path and an LLM planner is
 //!   prone to invoking it for any vague question, blowing through
-//!   budget. The hook plugin (PROJEC-T-0070) drives `explore` directly
-//!   via the engine trait when its decision model determines a rewrite
-//!   is warranted. If/when there's a concrete need for an MCP-exposed
-//!   exploration tool, add one then — with explicit budget arguments
-//!   surfaced to the agent.
-//! - `recall_memory` / `record_memory` are **not** exposed via MCP in
-//!   v1. The memory store is per-developer local state (no shared
-//!   write source, no persistence in v1), so advertising it as an
-//!   MCP tool would surface a feature that always returns empty.
-//!   The trait methods exist and work — they're available to internal
-//!   callers (hooks, future tooling) — but the agent-facing surface
-//!   stays out of v1 until there's a clear write story.
+//!   budget. The UserPromptSubmit hook drives `explore` directly via
+//!   the engine trait when its router determines RLM is warranted.
+//! - `search_docs` (dependency-doc retrieval) is **not** exposed via
+//!   MCP in v1. Muninn is positioned as an RLM in v1; other context
+//!   injection mechanisms — dependency docs, memory, etc. — get
+//!   their own surfaces when their write/index story is clear. The
+//!   `doc_store` + indexer infra still exists and the RLM's internal
+//!   `search_docs` tool may use it during recursive exploration; only
+//!   the *agent-facing* surface is gated.
 //! - Schemas derive from [`crate::types`] so the wire shape and the
 //!   trait surface can't drift.
 //!
@@ -38,7 +35,7 @@ use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::types::{DocsQuery, DocsResult, GraphQuery, GraphResult, SearchQuery, SearchResult};
+use crate::types::{GraphQuery, GraphResult, SearchQuery, SearchResult};
 
 /// Stability classification for a tool schema.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -54,7 +51,7 @@ pub enum SchemaStability {
 
 /// Self-describing schema for one MCP tool.
 ///
-/// The MCP server (PROJEC-T-0068) consumes these by name to advertise
+/// The MCP server consumes these by name to advertise
 /// tools to clients. The schemas also feed the docs page at
 /// `docs/mcp-tools.md`.
 #[derive(Debug, Clone, Serialize)]
@@ -79,11 +76,7 @@ pub struct McpToolSchema {
 /// Order is documentation-style (most commonly used first); the MCP
 /// server may sort however it likes.
 pub fn tool_schemas() -> Vec<McpToolSchema> {
-    vec![
-        search_code_schema(),
-        query_graph_schema(),
-        search_docs_schema(),
-    ]
+    vec![search_code_schema(), query_graph_schema()]
 }
 
 fn schema_value<T: JsonSchema>() -> Value {
@@ -142,31 +135,6 @@ this over Grep for call-chain reasoning.",
     }
 }
 
-fn search_docs_schema() -> McpToolSchema {
-    McpToolSchema {
-        name: "search_docs",
-        description: "\
-Use this when you need API or usage information for an indexed library \
-(crates.io / PyPI). Returns ranked documentation chunks with the library \
-name, version, and item path. Filter by ecosystem or library when you \
-already know which one you want.",
-        input_schema: schema_value::<DocsQuery>(),
-        output_schema: schema_value::<DocsResult>(),
-        examples: vec![
-            serde_json::json!({
-                "query": "spawning blocking tasks",
-                "ecosystem": "rust",
-                "library": "tokio",
-                "limit": 5
-            }),
-            serde_json::json!({
-                "query": "datetime parsing iso8601"
-            }),
-        ],
-        stability: SchemaStability::Stable,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,7 +142,7 @@ mod tests {
     #[test]
     fn tool_schemas_lists_all_expected_tools() {
         let names: Vec<&'static str> = tool_schemas().iter().map(|s| s.name).collect();
-        assert_eq!(names, vec!["search_code", "query_graph", "search_docs"]);
+        assert_eq!(names, vec!["search_code", "query_graph"]);
     }
 
     #[test]
@@ -185,13 +153,6 @@ mod tests {
         assert!(
             !names.contains(&"explore"),
             "explore should not be exposed via MCP"
-        );
-        // Memory is per-developer local state without a v1 write
-        // source; advertising recall_memory would surface a tool that
-        // always returns empty.
-        assert!(
-            !names.contains(&"recall_memory"),
-            "recall_memory should not be exposed via MCP in v1"
         );
     }
 

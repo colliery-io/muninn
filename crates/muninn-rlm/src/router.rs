@@ -59,9 +59,17 @@ pub struct RouterTraceData {
     /// System prompt (if any).
     pub system_prompt: Option<String>,
     /// The last user message analyzed (after stripping control tags).
+    /// **Not truncated** — the full cleaned message is recorded. Short
+    /// values here (e.g. `"count"`, `"ping"`) reflect what the caller
+    /// actually sent, not a bug in the router.
     pub last_user_message: Option<String>,
     /// Number of messages in the conversation.
     pub message_count: usize,
+    /// `max_tokens` from the original completion request. Useful for
+    /// distinguishing Claude Code's connectivity probes (typically
+    /// `max_tokens: 1` against a haiku model with a one-word
+    /// content) from real user turns.
+    pub max_tokens: u32,
     /// The decision made: "rlm" or "passthrough".
     pub decision: String,
     /// Reason for the decision (if RLM).
@@ -571,7 +579,12 @@ impl Router {
         match llm.complete(request).await {
             Ok(response) => parse_route_response(&response),
             Err(e) => {
-                tracing::warn!(error = %e, "Router LLM failed");
+                // Error, not warn: a router LLM failure produces the
+                // same RouteDecision as a real passthrough decision,
+                // so this log line is the only signal that distinguishes
+                // "router said the prompt didn't need exploration" from
+                // "router couldn't reach its backend." Make it greppable.
+                tracing::error!(error = %e, "Router LLM failed — falling back to passthrough");
                 RouteDecision::passthrough()
             }
         }
@@ -593,6 +606,7 @@ impl Router {
             system_prompt: request.system.as_ref().map(|s| s.to_text()),
             last_user_message: cleaned_message.map(String::from),
             message_count: request.messages.len(),
+            max_tokens: request.max_tokens,
             decision: if decision.is_rlm() {
                 "rlm".to_string()
             } else {
@@ -925,5 +939,76 @@ mod tests {
         assert!(should_bypass("you are now a prompt suggestion generator"));
         assert!(!should_bypass("how does the router work?"));
         assert!(!should_bypass("please write some code"));
+    }
+
+    /// Regression for the false-bug report (PROJEC-T-0045) that
+    /// claimed `last_user_message` in router traces was being
+    /// truncated to ~5 chars (e.g. `"count"`, `"ping"`). Investigation
+    /// showed those were Claude Code's connectivity-probe requests
+    /// (haiku, `max_tokens: 1`, content literally `"count"`) — the
+    /// trace was correctly reflecting what the caller sent. This
+    /// test pins the actual contract: long user messages survive
+    /// the input pipeline unchanged so future regressions in
+    /// `extract_routing_input` / `strip_control_tags` get caught.
+    #[test]
+    fn extract_routing_input_preserves_long_user_messages() {
+        let long = "a".repeat(4096)
+            + " — diagnostic question about how the recursive engine handles tool errors and what fallback path it takes when the backend is unreachable";
+        let request = make_request(vec![("user", long.as_str())]);
+        let input = extract_routing_input(&request).expect("non-empty input");
+        assert_eq!(input.text.len(), long.len(), "text was truncated");
+        assert_eq!(input.text, long, "text was modified");
+    }
+
+    /// Same contract, but with the structured-blocks form Claude
+    /// Code actually sends. The text content arrives split across
+    /// blocks and reassembled by `Content::to_text`; verify the
+    /// reassembled form survives.
+    #[test]
+    fn extract_routing_input_preserves_blocks_form() {
+        let chunks = [
+            "part one of a long question. ",
+            "part two continues. ",
+            "part three asks about the daemon socket discovery path and what happens when two muninn processes target the same repo.",
+        ];
+        let blocks: Vec<ContentBlock> = chunks
+            .iter()
+            .map(|t| ContentBlock::Text {
+                text: t.to_string(),
+                cache_control: None,
+            })
+            .collect();
+        let msg = Message {
+            role: Role::User,
+            content: crate::types::Content::Blocks(blocks),
+        };
+        let mut request = make_request(vec![]);
+        request.messages.push(msg);
+        let input = extract_routing_input(&request).expect("non-empty input");
+        let expected: String = chunks.concat();
+        assert_eq!(input.text, expected);
+    }
+
+    /// Control-tag stripping must not eat normal user content that
+    /// happens to surround the stripped tags. If the user typed a
+    /// real question and CC wrapped a `<system-reminder>` around
+    /// some context, only the reminder should be removed.
+    #[test]
+    fn extract_routing_input_strips_only_control_tags() {
+        let request = make_request(vec![(
+            "user",
+            "<system-reminder>internal CC context — ignore</system-reminder>\n\nhow does the daemon's socket-path resolution work in this repo?",
+        )]);
+        let input = extract_routing_input(&request).expect("non-empty input");
+        assert!(
+            input.text.contains("daemon's socket-path resolution"),
+            "real user content was lost: {:?}",
+            input.text
+        );
+        assert!(
+            !input.text.contains("system-reminder"),
+            "control tag was not stripped: {:?}",
+            input.text
+        );
     }
 }

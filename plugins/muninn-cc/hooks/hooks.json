@@ -1,18 +1,6 @@
 {
-  "description": "muninn-cc hooks — PreToolUse augments Grep/Read/Glob; UserPromptSubmit pre-injects project context once per user turn.",
+  "description": "muninn-cc hooks — UserPromptSubmit drives a router-gated RLM exploration on a local model and injects the answer once per user turn, so Claude doesn't have to discover project context itself.",
   "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Grep|Read|Glob",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/pre-tool-use.sh",
-            "timeout": 1
-          }
-        ]
-      }
-    ],
     "UserPromptSubmit": [
       {
         "matcher": "*",
@@ -20,7 +8,7 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/user-prompt-submit.sh",
-            "timeout": 3
+            "timeout": 245
           }
         ]
       }

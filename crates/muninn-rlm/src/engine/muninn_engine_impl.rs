@@ -1,26 +1,25 @@
 //! `MuninnEngine` trait implementation for [`RecursiveEngine`].
 //!
 //! This wires the adapter-neutral trait from `muninn-core` to muninn-rlm's
-//! existing recursive exploration engine. The rich `complete()` method is
-//! the load-bearing one — it's what the proxy adapter calls — and it
-//! delegates directly to [`RecursiveEngine::complete`].
+//! existing recursive exploration engine. Status:
+//! - `complete` — load-bearing; delegates to [`RecursiveEngine::complete`].
+//! - `search_code` — wired against [`crate::fs_tools::SearchFilesTool`].
+//! - `query_graph` — wired against the optional graph store for
+//!   `Callers` / `Callees` / `Defines`. `References` still returns
+//!   an explicit "not yet implemented" error.
+//! - `explore` — still stubbed; will land when the lightweight DTO
+//!   has a clearer story.
 //!
-//! Wiring status (as of the memory-store wiring commit):
-//! - `complete` — fully wired; delegates to [`RecursiveEngine::complete`].
-//! - `recall_memory` / `record_memory` — wired against the optional
-//!   `EngineDeps::memory_store` (defaults to an [`InMemoryStore`] when
-//!   constructed via [`crate::engine::default_engine`]).
-//! - `search_code`, `explore`, `search_docs`, `query_graph` — still
-//!   stubbed; require direct handles to the file system, recursive
-//!   engine entry point, doc store, and graph store respectively.
-//!   Tracked as follow-ups (see PROJEC-T-0065 status notes).
+//! `search_docs` is no longer on the trait — it was dropped from
+//! v1's externally-exposed surface to keep muninn focused on RLM.
+//! The doc store + indexer infra still exists and the RLM's
+//! internal exploration tools may use it.
 
 use async_trait::async_trait;
 
 use muninn_core::{
-    CompletionRequest, CompletionResponse, DocsQuery, DocsResult, ExploreRequest, ExploreResult,
-    GraphQuery, GraphResult, MemoryHit, MemoryItem, MemoryQuery, MuninnCoreError, MuninnEngine,
-    SearchQuery, SearchResult, error::Result as CoreResult,
+    CompletionRequest, CompletionResponse, ExploreRequest, ExploreResult, GraphQuery, GraphResult,
+    MuninnCoreError, MuninnEngine, SearchQuery, SearchResult, error::Result as CoreResult,
 };
 
 use super::RecursiveEngine;
@@ -36,83 +35,162 @@ impl MuninnEngine for RecursiveEngine {
             .map_err(rlm_to_core)
     }
 
-    async fn search_code(&self, _query: SearchQuery) -> CoreResult<SearchResult> {
-        Err(MuninnCoreError::internal(
-            "search_code is not yet wired to RecursiveEngine — see PROJEC-T-0065 status notes",
-        ))
+    async fn search_code(&self, query: SearchQuery) -> CoreResult<SearchResult> {
+        let Some(work_dir) = self.work_dir.as_ref() else {
+            return Err(MuninnCoreError::internal(
+                "search_code: engine has no work_dir configured",
+            ));
+        };
+        let tool = crate::fs_tools::SearchFilesTool::with_fs(work_dir, self.file_system.clone());
+        tool.run_search(query).await
     }
 
     async fn explore(&self, _request: ExploreRequest) -> CoreResult<ExploreResult> {
         Err(MuninnCoreError::internal(
-            "explore is not yet wired to RecursiveEngine via the lightweight DTO — see PROJEC-T-0065 status notes",
+            "explore: lightweight DTO path is not yet wired; use `complete` with a recursive `MuninnConfig` for now",
         ))
     }
 
-    async fn recall_memory(&self, query: MemoryQuery) -> CoreResult<Vec<MemoryHit>> {
-        let Some(store) = self.memory_store.as_ref() else {
+    async fn query_graph(&self, query: GraphQuery) -> CoreResult<GraphResult> {
+        let Some(store) = self.graph_store.as_ref() else {
             return Err(MuninnCoreError::internal(
-                "recall_memory: no memory store attached to RecursiveEngine \
-                 (construct via default_engine_with_memory or attach via \
-                 EngineDeps::with_memory_store)",
+                "query_graph: engine has no graph store configured",
             ));
         };
-        let limit = query.limit.unwrap_or(8) as usize;
-        let entries = store
-            .search(&query.query, limit)
-            .map_err(|e| MuninnCoreError::Storage(format!("memory search: {e}")))?;
-        Ok(entries
-            .into_iter()
-            .map(|e| MemoryHit {
-                id: e.id,
-                content: e.content,
-                // MemoryEntry.relevance is already clamped to [0,1].
-                score: e.relevance,
-            })
-            .collect())
+        run_graph_query(store, query)
     }
+}
 
-    async fn record_memory(&self, item: MemoryItem) -> CoreResult<()> {
-        let Some(store) = self.memory_store.as_ref() else {
-            return Err(MuninnCoreError::internal(
-                "record_memory: no memory store attached to RecursiveEngine \
-                 (construct via default_engine_with_memory or attach via \
-                 EngineDeps::with_memory_store)",
-            ));
-        };
-        // Synthesize an id from a SHA-256 of the content + source so
-        // repeated record calls with the same content de-dup cleanly.
-        // (The store's `store(...)` overwrites on id collision.)
-        let id = {
-            use sha2::{Digest, Sha256};
-            let mut h = Sha256::new();
-            h.update(item.content.as_bytes());
-            if let Some(src) = item.source.as_deref() {
-                h.update(b"\0");
-                h.update(src.as_bytes());
+/// Translate a [`GraphQuery`] into the appropriate
+/// [`muninn_graph::GraphStore`] call(s) and shape the result into a
+/// [`GraphResult`]. Each branch:
+/// - resolves the `target` (treated first as an existing node id; if
+///   no node has that id, falls back to `find_by_name`),
+/// - calls the matching store method,
+/// - synthesizes one edge per returned node, oriented per the query kind.
+///
+/// `Defines` returns the resolved definition node(s) with no edges.
+/// `References` is not yet implemented at the store level — surface a
+/// clear error rather than fake-empty results.
+fn run_graph_query(
+    store: &crate::graph_tools::SharedGraphStore,
+    query: muninn_core::types::GraphQuery,
+) -> muninn_core::error::Result<muninn_core::types::GraphResult> {
+    use muninn_core::MuninnCoreError;
+    use muninn_core::types::{GraphEdge, GraphNode, GraphQueryKind, GraphResult};
+
+    let guard = store
+        .lock()
+        .map_err(|_| MuninnCoreError::internal("graph store mutex poisoned"))?;
+
+    // Resolve target → node id. Try id-as-given first (cheap has_node
+    // check), then name lookup.
+    let resolved_id = match guard.has_node(&query.target) {
+        Ok(true) => query.target.clone(),
+        _ => {
+            let matches = guard
+                .find_by_name(&query.target)
+                .map_err(|e| MuninnCoreError::internal(format!("graph find_by_name: {e}")))?;
+            if matches.is_empty() {
+                return Ok(GraphResult {
+                    nodes: vec![],
+                    edges: vec![],
+                });
             }
-            let bytes = h.finalize();
-            let hex: String = bytes.iter().take(12).map(|b| format!("{b:02x}")).collect();
-            format!("mem_{hex}")
+            match extract_id(&matches[0]) {
+                Some(id) => id,
+                None => {
+                    return Err(MuninnCoreError::internal("graph node missing id property"));
+                }
+            }
+        }
+    };
+
+    let (raw_nodes, edge_kind): (Vec<graphqlite::Value>, &str) = match query.kind {
+        GraphQueryKind::Callers => {
+            let v = guard
+                .find_callers(&resolved_id)
+                .map_err(|e| MuninnCoreError::internal(format!("graph find_callers: {e}")))?;
+            (v, "calls")
+        }
+        GraphQueryKind::Callees => {
+            let v = guard
+                .find_callees(&resolved_id)
+                .map_err(|e| MuninnCoreError::internal(format!("graph find_callees: {e}")))?;
+            (v, "calls")
+        }
+        GraphQueryKind::Defines => {
+            let v = guard
+                .find_by_name(&query.target)
+                .map_err(|e| MuninnCoreError::internal(format!("graph find_by_name: {e}")))?;
+            (v, "defines")
+        }
+        GraphQueryKind::References => {
+            return Err(MuninnCoreError::internal(
+                "query_graph: references is not yet implemented at the store level",
+            ));
+        }
+    };
+
+    let mut nodes = vec![GraphNode {
+        id: resolved_id.clone(),
+        location: None,
+    }];
+    let mut edges = Vec::new();
+    for raw in &raw_nodes {
+        let id = extract_id(raw).unwrap_or_else(|| String::from("<unknown>"));
+        let location = extract_location(raw);
+        // For Callers: edge points from caller → target.
+        // For Callees and Defines: edge points from target → callee/def.
+        let (from, to) = match query.kind {
+            GraphQueryKind::Callers => (id.clone(), resolved_id.clone()),
+            _ => (resolved_id.clone(), id.clone()),
         };
-        let category = item.source.clone().unwrap_or_else(|| "default".to_string());
-        let entry = crate::memory_tools::MemoryEntry::new(id, item.content, category);
-        store
-            .store(entry)
-            .map_err(|e| MuninnCoreError::Storage(format!("memory store: {e}")))?;
-        Ok(())
+        nodes.push(GraphNode { id, location });
+        edges.push(GraphEdge {
+            from,
+            to,
+            kind: edge_kind.to_string(),
+        });
     }
+    Ok(GraphResult { nodes, edges })
+}
 
-    async fn search_docs(&self, _query: DocsQuery) -> CoreResult<DocsResult> {
-        Err(MuninnCoreError::internal(
-            "search_docs is not yet wired to RecursiveEngine — see PROJEC-T-0065 status notes",
-        ))
+/// Pull the `id` string out of a graphqlite node Value. Mirrors the
+/// extraction logic the existing tool-side helper uses.
+fn extract_id(value: &graphqlite::Value) -> Option<String> {
+    if let graphqlite::Value::Object(map) = value {
+        if let Some(graphqlite::Value::Object(props)) = map.get("properties") {
+            if let Some(graphqlite::Value::String(id)) = props.get("id") {
+                return Some(id.clone());
+            }
+        }
+        if let Some(graphqlite::Value::String(id)) = map.get("id") {
+            return Some(id.clone());
+        }
     }
+    None
+}
 
-    async fn query_graph(&self, _query: GraphQuery) -> CoreResult<GraphResult> {
-        Err(MuninnCoreError::internal(
-            "query_graph is not yet wired to RecursiveEngine — see PROJEC-T-0065 status notes",
-        ))
-    }
+/// Best-effort `file:line` extraction for the [`GraphNode::location`]
+/// field. Returns `None` when the node doesn't carry that property.
+fn extract_location(value: &graphqlite::Value) -> Option<String> {
+    let graphqlite::Value::Object(map) = value else {
+        return None;
+    };
+    let props = match map.get("properties") {
+        Some(graphqlite::Value::Object(p)) => p,
+        _ => map,
+    };
+    let file = match props.get("file") {
+        Some(graphqlite::Value::String(s)) => s.clone(),
+        _ => return None,
+    };
+    let line = match props.get("line") {
+        Some(graphqlite::Value::Integer(i)) => *i,
+        _ => return Some(file),
+    };
+    Some(format!("{file}:{line}"))
 }
 
 /// Map a muninn-rlm `RlmError` to the adapter-neutral `MuninnCoreError`.
@@ -134,110 +212,4 @@ fn format_budget(b: &BudgetExceededError) -> String {
         "{:?} budget exceeded (limit={}, actual={})",
         b.budget_type, b.limit, b.actual
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::backend::MockBackend;
-    use crate::engine::{EngineConfig, EngineDeps};
-    use crate::memory_tools::InMemoryStore;
-    use crate::tools::EmptyToolEnvironment;
-    use muninn_core::types::{MemoryItem, MemoryQuery};
-    use std::sync::Arc;
-
-    fn engine_with_memory() -> RecursiveEngine {
-        let backend = Arc::new(MockBackend::new(vec![]));
-        let tools = Arc::new(EmptyToolEnvironment);
-        let store = Arc::new(InMemoryStore::new());
-        let deps = EngineDeps::new(backend, tools).with_memory_store(store);
-        RecursiveEngine::new(deps, EngineConfig::default())
-    }
-
-    fn engine_without_memory() -> RecursiveEngine {
-        let backend = Arc::new(MockBackend::new(vec![]));
-        let tools = Arc::new(EmptyToolEnvironment);
-        let deps = EngineDeps::new(backend, tools);
-        RecursiveEngine::new(deps, EngineConfig::default())
-    }
-
-    #[tokio::test]
-    async fn recall_memory_returns_empty_for_fresh_store() {
-        let engine = engine_with_memory();
-        let hits = engine
-            .recall_memory(MemoryQuery {
-                query: "anything".into(),
-                limit: Some(5),
-            })
-            .await
-            .expect("recall should succeed against attached store");
-        assert!(hits.is_empty());
-    }
-
-    #[tokio::test]
-    async fn record_then_recall_round_trips_content() {
-        let engine = engine_with_memory();
-        engine
-            .record_memory(MemoryItem {
-                content: "the daemon uses setsid to detach the child".into(),
-                source: Some("ADR-0003".into()),
-            })
-            .await
-            .expect("record");
-        let hits = engine
-            .recall_memory(MemoryQuery {
-                query: "setsid".into(),
-                limit: Some(5),
-            })
-            .await
-            .expect("recall");
-        assert_eq!(hits.len(), 1, "expected 1 hit for 'setsid', got {hits:?}");
-        assert!(hits[0].content.contains("setsid"));
-        assert!(!hits[0].id.is_empty());
-    }
-
-    #[tokio::test]
-    async fn record_is_idempotent_on_same_content_and_source() {
-        let engine = engine_with_memory();
-        for _ in 0..3 {
-            engine
-                .record_memory(MemoryItem {
-                    content: "same thing".into(),
-                    source: Some("test".into()),
-                })
-                .await
-                .expect("record");
-        }
-        let hits = engine
-            .recall_memory(MemoryQuery {
-                query: "same".into(),
-                limit: Some(10),
-            })
-            .await
-            .expect("recall");
-        // SHA-256-of-content+source as id => same id => store::store
-        // overwrites => one entry survives.
-        assert_eq!(hits.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn engine_without_store_returns_internal_error() {
-        let engine = engine_without_memory();
-        let err = engine
-            .recall_memory(MemoryQuery {
-                query: "x".into(),
-                limit: None,
-            })
-            .await
-            .unwrap_err();
-        assert!(matches!(err, MuninnCoreError::Internal(_)));
-        let err = engine
-            .record_memory(MemoryItem {
-                content: "x".into(),
-                source: None,
-            })
-            .await
-            .unwrap_err();
-        assert!(matches!(err, MuninnCoreError::Internal(_)));
-    }
 }

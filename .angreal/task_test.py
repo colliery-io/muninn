@@ -168,7 +168,7 @@ def _repo_root() -> pathlib.Path:
         ## Examples
         ```
         angreal test uat                  # all UAT tests
-        angreal test uat -n hook_decide   # just the hook_decide UAT
+        angreal test uat -n routing       # filter by name substring
         ```
 
         Requires `sops` + `age` installed and `SOPS_AGE_KEY_FILE` set
@@ -200,7 +200,6 @@ def test_uat(name=None):
     # subprocess UAT in `crates/muninn-rlm/tests/uat.rs`.
     uat_targets = [
         ("muninn", "uat"),
-        ("muninn", "hook_failure_modes"),
         ("muninn", "daemon_lifecycle"),
         ("muninn", "mcp_protocol"),
         ("muninn", "routing"),

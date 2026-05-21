@@ -15,7 +15,6 @@ tags:
 
 
 exit_criteria_met: false
-strategy_id: NULL
 initiative_id: PROJEC-I-0009
 ---
 
@@ -64,6 +63,8 @@ initiative_id: PROJEC-I-0009
 - **Current Problems**: {What's difficult/slow/buggy now}
 - **Benefits of Fixing**: {What improves after refactoring}
 - **Risk Assessment**: {Risks of not addressing this}
+
+## Acceptance Criteria
 
 ## Acceptance Criteria
 

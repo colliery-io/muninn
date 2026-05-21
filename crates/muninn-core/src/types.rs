@@ -87,79 +87,6 @@ pub struct ExploreResult {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// recall_memory / record_memory
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Lookup against the engine's persistent memory store.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct MemoryQuery {
-    /// Natural-language or keyword query. The engine picks the retrieval
-    /// strategy (embedding, keyword, hybrid).
-    pub query: String,
-    /// Maximum hits to return.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limit: Option<u32>,
-}
-
-/// A single match against the memory store.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct MemoryHit {
-    /// Opaque identifier; stable across the lifetime of the store.
-    pub id: String,
-    /// The remembered content (markdown).
-    pub content: String,
-    /// Engine-assigned relevance score in `[0.0, 1.0]`.
-    pub score: f32,
-}
-
-/// A new entry to persist in the memory store.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct MemoryItem {
-    /// Markdown content to remember.
-    pub content: String,
-    /// Optional source tag (file path, ADR id, etc.) — helps the engine
-    /// rank / dedupe later.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// search_docs
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Search the indexed library documentation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct DocsQuery {
-    /// The natural-language query (e.g. "how do tokio joinsets work").
-    pub query: String,
-    /// Optional ecosystem filter (e.g. `"rust"`, `"python"`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ecosystem: Option<String>,
-    /// Optional library filter (e.g. `"tokio"`, `"requests"`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub library: Option<String>,
-    /// Maximum hits to return.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limit: Option<u32>,
-}
-
-/// A single docs-search hit.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct DocsHit {
-    pub library: String,
-    pub version: String,
-    pub item_path: String,
-    pub snippet: String,
-    pub score: f32,
-}
-
-/// Aggregated docs-search result.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct DocsResult {
-    pub hits: Vec<DocsHit>,
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // query_graph
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -257,15 +184,5 @@ mod tests {
         };
         let s = serde_json::to_string(&q).unwrap();
         assert!(s.contains("\"callers\""));
-    }
-
-    #[test]
-    fn memory_item_source_optional() {
-        let item = MemoryItem {
-            content: "remember this".into(),
-            source: None,
-        };
-        let s = serde_json::to_string(&item).unwrap();
-        assert!(!s.contains("source"));
     }
 }

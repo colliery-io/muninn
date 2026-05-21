@@ -71,6 +71,20 @@ pub fn is_retryable(error: &RlmError) -> bool {
     matches!(error, RlmError::Network(_))
 }
 
+/// Resolve the wire-level model name for a request. Prefer the
+/// per-request override when set so tier-config (router/rlm) and
+/// caller-pinned models flow through; fall back to the backend's
+/// default. Returns `default_model` even if both are empty — the
+/// provider will return a clearer error than a panic here.
+pub fn pick_model(request_model: &str, default_model: &str) -> String {
+    let r = request_model.trim();
+    if r.is_empty() {
+        default_model.to_string()
+    } else {
+        r.to_string()
+    }
+}
+
 /// A streaming response from an LLM backend.
 pub type ResponseStream = Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send + 'static>>;
 

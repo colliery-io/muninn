@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use reqwest::{Client, header};
 use std::time::Duration;
 
-use crate::backend::{LLMBackend, ResponseStream, StreamEvent, with_retry};
+use crate::backend::{LLMBackend, ResponseStream, StreamEvent, pick_model, with_retry};
 use crate::error::{Result, RlmError};
 use crate::types::{
     CompletionRequest, CompletionResponse, ContentBlock, Role, StopReason, ToolResultContent, Usage,
@@ -33,7 +33,10 @@ pub struct OllamaConfig {
     /// API key. Required when targeting Ollama Cloud; unused for local.
     pub api_key: Option<String>,
 
-    /// Model to use for completions (overrides request model).
+    /// Default model used when the per-request `CompletionRequest.model`
+    /// is empty. A non-empty `request.model` always wins; this lets a
+    /// single configured backend serve callers that pin a model (RLM /
+    /// router tier overrides) and callers that don't.
     pub model: String,
 
     /// Request timeout.
@@ -271,7 +274,7 @@ impl OllamaBackend {
         };
 
         OllamaChatRequest {
-            model: self.config.model.clone(),
+            model: pick_model(&request.model, &self.config.model),
             messages,
             max_tokens: Some(request.max_tokens),
             temperature: request.temperature,

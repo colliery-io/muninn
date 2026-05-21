@@ -1,8 +1,8 @@
 //! UAT — daemon lifecycle round-trip.
 //!
-//! Exercises the new `muninn daemon` machinery (PROJEC-T-0066) against
-//! a real OS: Unix socket bind, detached child via `setsid`, PID file
-//! handling, SIGTERM-then-SIGKILL escalation in `stop`, and `ensure`
+//! Exercises the `muninn daemon` machinery against a real OS: Unix
+//! socket bind, detached child via `setsid`, PID file handling,
+//! SIGTERM-then-SIGKILL escalation in `stop`, and `ensure`
 //! auto-respawn after a hard kill.
 //!
 //! Each test uses a unique socket path under a per-test tempdir so

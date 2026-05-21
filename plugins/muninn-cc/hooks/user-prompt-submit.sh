@@ -6,9 +6,8 @@
 # graph hits, code references) into the turn so Claude has it from
 # the first token.
 #
-# Same NFR-002 contract as the PreToolUse hook: every failure path
-# collapses to silent passthrough so muninn can never block the
-# user's turn from starting.
+# NFR-002 contract: every failure path collapses to silent passthrough
+# so muninn can never block the user's turn from starting.
 
 set -u
 

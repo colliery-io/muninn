@@ -49,21 +49,23 @@ pub fn default_engine(
     budget: Option<BudgetConfig>,
     work_dir: Option<PathBuf>,
 ) -> Arc<dyn MuninnEngine> {
-    default_engine_with_memory(backend, tools, budget, work_dir, None)
+    default_engine_with_graph(backend, tools, budget, work_dir, None)
 }
 
-/// Same as [`default_engine`] but lets the caller plug in a shared
-/// memory store (e.g. SQLite-backed instead of the in-memory default).
-/// Passing `None` falls back to a fresh [`crate::memory_tools::InMemoryStore`].
-pub fn default_engine_with_memory(
+/// Like [`default_engine`], but also wires a shared graph store
+/// through to the engine so the `MuninnEngine::query_graph` trait
+/// method has something to query.
+pub fn default_engine_with_graph(
     backend: Arc<dyn LLMBackend>,
     tools: Arc<dyn ToolEnvironment>,
     budget: Option<BudgetConfig>,
     work_dir: Option<PathBuf>,
-    memory: Option<crate::memory_tools::SharedMemoryStore>,
+    graph_store: Option<crate::graph_tools::SharedGraphStore>,
 ) -> Arc<dyn MuninnEngine> {
-    let memory = memory.unwrap_or_else(|| Arc::new(crate::memory_tools::InMemoryStore::new()));
-    let deps = EngineDeps::new(backend, tools).with_memory_store(memory);
+    let mut deps = EngineDeps::new(backend, tools);
+    if let Some(g) = graph_store {
+        deps = deps.with_graph_store(g);
+    }
     let mut config = EngineConfig::default();
     if let Some(b) = budget {
         config = config.with_budget(b);
@@ -80,11 +82,10 @@ pub struct EngineDeps {
     pub backend: Arc<dyn LLMBackend>,
     pub tools: Arc<dyn ToolEnvironment>,
     pub file_system: Option<SharedFileSystem>,
-    /// Shared memory store. When `None`, the [`MuninnEngine`] trait
-    /// methods `recall_memory` / `record_memory` fail with the
-    /// "not yet wired" stub error. Adapters typically attach an
-    /// [`crate::memory_tools::InMemoryStore`] via [`default_engine_with_memory`].
-    pub memory_store: Option<crate::memory_tools::SharedMemoryStore>,
+    /// Optional shared code graph. When set, the [`MuninnEngine::query_graph`]
+    /// trait method dispatches against it; otherwise the trait
+    /// surfaces a clear "no graph configured" error.
+    pub graph_store: Option<crate::graph_tools::SharedGraphStore>,
 }
 
 impl EngineDeps {
@@ -93,7 +94,7 @@ impl EngineDeps {
             backend,
             tools,
             file_system: None,
-            memory_store: None,
+            graph_store: None,
         }
     }
 
@@ -102,8 +103,8 @@ impl EngineDeps {
         self
     }
 
-    pub fn with_memory_store(mut self, store: crate::memory_tools::SharedMemoryStore) -> Self {
-        self.memory_store = Some(store);
+    pub fn with_graph_store(mut self, store: crate::graph_tools::SharedGraphStore) -> Self {
+        self.graph_store = Some(store);
         self
     }
 
@@ -180,14 +181,10 @@ pub struct RecursiveEngine {
     backend: Arc<dyn LLMBackend>,
     tools: Arc<dyn ToolEnvironment>,
     tool_executor: ToolExecutor,
-    #[allow(dead_code)]
-    file_system: SharedFileSystem,
-    /// Optional shared memory store the trait's `recall_memory` /
-    /// `record_memory` methods route through. `None` ⇒ trait methods
-    /// return the "not yet wired" stub error (PROJEC-T-0065 carve-out).
-    pub(crate) memory_store: Option<crate::memory_tools::SharedMemoryStore>,
+    pub(crate) file_system: SharedFileSystem,
+    pub(crate) graph_store: Option<crate::graph_tools::SharedGraphStore>,
     default_budget: BudgetConfig,
-    work_dir: Option<PathBuf>,
+    pub(crate) work_dir: Option<PathBuf>,
     #[allow(dead_code)]
     temperature: Option<f32>,
     #[allow(dead_code)]
@@ -203,7 +200,7 @@ impl RecursiveEngine {
             tools: deps.tools,
             tool_executor,
             file_system,
-            memory_store: deps.memory_store,
+            graph_store: deps.graph_store,
             default_budget: config.budget,
             work_dir: config.work_dir,
             temperature: config.temperature,

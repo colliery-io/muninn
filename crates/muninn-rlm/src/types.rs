@@ -7,6 +7,6 @@
 //!
 //! Prefer `muninn_core::llm::Foo` (or the top-level `muninn_core::Foo`
 //! re-exports) for new code; this shim exists for in-crate backwards
-//! compatibility during the engine-boundary refactor (PROJEC-T-0065).
+//! compatibility with the pre-engine-boundary call sites.
 
 pub use muninn_core::llm::*;
