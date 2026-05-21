@@ -42,45 +42,56 @@ See [ADR-0003](.metis/adrs/PROJEC-A-0003.md) for the rationale behind keeping bo
 
 ## Installation
 
-### Quick Install (Linux/macOS)
+### Step 1 — install the binary
 
 ```bash
+# Linux/macOS prebuilt:
 curl -fsSL https://raw.githubusercontent.com/colliery-io/muninn/main/install.sh | bash
-```
 
-### From Source
-
-Requires Rust 1.85+ (workspace edition 2024):
-
-```bash
+# Or from source (Rust 1.85+, workspace edition 2024):
 git clone https://github.com/colliery-io/muninn.git
 cd muninn
 cargo build --release
+cargo install --path crates/muninn
 ```
 
-### Provider credentials
+Verify with `muninn --version`. The installer drops the binary in `~/.local/bin/`; make sure that's on your `PATH`.
 
-Muninn's tiered config defaults to Ollama Cloud + `gemma4:31b` for both router and recursive exploration. Get an [Ollama Cloud](https://ollama.com) API key and export it:
+### Step 2 — initialize the project
+
+Inside the repo you want muninn to know about:
+
+```bash
+muninn init
+```
+
+This creates `.muninn/config.toml` with a sensible tiered config (Ollama Cloud + `gemma4:31b` as the default for router and RLM), plus the `.muninn/` directory where muninn keeps its graph index, sessions, and traces. `.muninn/` is per-developer state — keep it gitignored.
+
+### Step 3 — provide a backend credential
+
+The out-of-the-box config talks to Ollama Cloud. Get an [Ollama Cloud](https://ollama.com) API key (free tier works) and export it:
 
 ```bash
 export OLLAMA_API_KEY="..."
 ```
 
-To use a different provider (Groq, Anthropic, local Ollama, …), see [Configuration](#configuration).
+For Groq, Anthropic direct, or a local Ollama daemon, see [Configuration](#configuration).
+
+That's the binary side done. Now wire it into your agent.
 
 ## Using muninn with Claude Code (recommended)
 
-This path uses CC's native hook + MCP extension points. No HTTP intercept, no protocol mimicry — muninn shows up as a regular plugin and a regular MCP server.
+This path uses CC's native hook + MCP extension points. No HTTP intercept, no protocol mimicry — muninn shows up as a regular plugin and a regular MCP server, sharing a single local daemon for both surfaces.
 
 ### 1. Register the MCP server
 
-In your repo, run:
+From inside your repo:
 
 ```bash
 muninn install-cc
 ```
 
-This writes a `.mcp.json` at the repo root with:
+This writes a `.mcp.json` at the repo root:
 
 ```json
 {
@@ -96,7 +107,7 @@ For a user-wide install (applies to every CC session):
 muninn install-cc --global
 ```
 
-Use `--dry-run` to preview without writing. The corresponding uninstall is `muninn uninstall-cc [--global]`.
+Use `--dry-run` to preview without writing. Roll back with `muninn uninstall-cc [--global]`.
 
 ### 2. Install the UserPromptSubmit plugin
 
@@ -107,6 +118,15 @@ From inside a Claude Code session in this repo:
 ```
 
 The plugin's UserPromptSubmit hook fires once per user turn: a cheap router model decides whether the prompt needs exploration; if it does, muninn drives its recursive exploration loop on the configured local/cheap backend and injects the result as `additionalContext`, framed as the answer for Claude to deliver. **Failure mode is always silent passthrough** — the hook never blocks the user's turn. See [`plugins/muninn-cc/README.md`](plugins/muninn-cc/README.md).
+
+### 3. (No action needed) the daemon
+
+You don't need to start the daemon explicitly. Both surfaces self-bootstrap:
+
+- `muninn mcp` auto-ensures the daemon when CC connects on session start.
+- The hook script (`user-prompt-submit.sh`) calls `muninn daemon ensure` ahead of `muninn hook submit`, which is a no-op when the daemon is already alive.
+
+Whichever surface fires first that turn starts the daemon; subsequent calls reuse the same socket. If you want to inspect or control it manually: `muninn daemon status` / `muninn daemon ensure` / `muninn daemon stop`.
 
 ### Available MCP tools
 
@@ -119,6 +139,16 @@ Full schema reference: [`docs/mcp-tools.md`](docs/mcp-tools.md). Other
 context-injection surfaces (dependency docs, persistent memory) are
 explicitly deferred from v1 — muninn v1 is positioned as an
 RLM-driven hook with a minimal explicit-tool surface.
+
+### Optional — index the code graph
+
+`query_graph` returns empty results against a fresh `.muninn/graph.db`. To populate it for this repo:
+
+```bash
+muninn index
+```
+
+The `search_code` MCP tool works without the graph (it walks the filesystem directly). Indexing only unlocks `query_graph`.
 
 ## Using muninn with other clients (proxy)
 

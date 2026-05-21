@@ -1862,9 +1862,12 @@ async fn submit_inner(
         return Ok(HookResponse::Passthrough);
     }
 
-    // Connect to the daemon. We deliberately do NOT auto-spawn — the
-    // cold-start cost on top of router + RLM would blow the deadline.
-    // If no daemon is up, degrade to passthrough.
+    // Connect to the daemon. `submit_inner` itself doesn't ensure
+    // the daemon — the plugin's shell entry (`user-prompt-submit.sh`)
+    // runs `muninn daemon ensure` ahead of us, which is idempotent
+    // when the daemon is already alive. If for any reason no daemon
+    // is up at this point (the ensure call failed, race, etc.) we
+    // degrade to silent passthrough per NFR-002.
     let socket = hook_socket_path(config, config_dir);
     if !muninn_rlm::daemon::is_alive(&socket).await {
         return Ok(HookResponse::Passthrough);
