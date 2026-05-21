@@ -21,15 +21,24 @@ updating the binary updates the plugin's behavior.
 ## Requirements
 
 - The `muninn` binary on `PATH`.
-- A running muninn daemon (the binary starts one automatically on first
-  use via `muninn daemon ensure`).
+- A running muninn daemon. The hook itself does **not** auto-spawn
+  one — cold-start cost would blow the per-turn budget — so start
+  it ahead of time with `muninn daemon ensure` (or rely on `muninn
+  mcp --ensure` if you're using the MCP server alongside).
 - A muninn `.muninn/config.toml` configured for at least one provider.
   See the top-level README for the tiered-config defaults.
 
 The hook is engineered for **silent passthrough on any failure**: if
-`muninn` is missing, errors, or times out, Claude Code processes the
-user's prompt with no injection. The plugin never blocks the user's
-turn (NFR-002).
+`muninn` is missing, the daemon is unreachable, the backend errors,
+or the deadline fires, Claude Code processes the user's prompt with
+no injection. The plugin never blocks the user's turn (NFR-002).
+
+The hook's outer deadline defaults to 240 seconds — recursive
+exploration on a local/cheap model regularly takes 20–60 s for
+code-shaped prompts, and the user is already waiting for Claude's
+first token, so a tighter cap silently squashed useful injections
+in practice. Override with `MUNINN_HOOK_DEADLINE_MS` (env var) when
+testing failure modes.
 
 ## Installation
 

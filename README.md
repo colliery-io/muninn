@@ -35,7 +35,7 @@ Muninn ships **two ways** to plug into your agent. They share the same engine; p
 
 | Surface | When to use | What it gives you |
 |---|---|---|
-| **Hook + MCP (Claude Code)** | You're using Claude Code (the primary recommendation). | A UserPromptSubmit hook that pre-answers each user prompt via a cheap local model and injects the result, plus an MCP server exposing `search_code`, `query_graph`, `search_docs`. Backed by a single local daemon. Sanctioned by CC's own extension points. |
+| **Hook + MCP (Claude Code)** | You're using Claude Code (the primary recommendation). | A UserPromptSubmit hook that pre-answers each user prompt via a cheap local model and injects the result, plus an MCP server exposing `search_code` and `query_graph`. Backed by a single local daemon. Sanctioned by CC's own extension points. |
 | **Proxy (everyone else)** | Cursor / Continue / Aider / any OpenAI- or Anthropic-compatible client. | A drop-in HTTP proxy that intercepts requests and routes them through a recursive exploration engine when appropriate. Same engine, different adapter. |
 
 See [ADR-0003](.metis/adrs/PROJEC-A-0003.md) for the rationale behind keeping both.
@@ -113,10 +113,12 @@ The plugin's UserPromptSubmit hook fires once per user turn: a cheap router mode
 Once installed, Claude Code can call:
 
 - **`search_code`** — ranked, scoped text/regex matches in the working tree
-- **`query_graph`** — callers / callees / definitions / references via the code graph
-- **`search_docs`** — indexed library documentation (crates.io / PyPI)
+- **`query_graph`** — callers / callees / definitions via the code graph
 
-Full schema reference: [`docs/mcp-tools.md`](docs/mcp-tools.md).
+Full schema reference: [`docs/mcp-tools.md`](docs/mcp-tools.md). Other
+context-injection surfaces (dependency docs, persistent memory) are
+explicitly deferred from v1 — muninn v1 is positioned as an
+RLM-driven hook with a minimal explicit-tool surface.
 
 ## Using muninn with other clients (proxy)
 
@@ -266,6 +268,9 @@ For fully local inference, override the Ollama base URL:
 ```toml
 [ollama]
 base_url = "http://localhost:11434/v1"
+# Optional: bound network retries. Default 3 × 500ms backoff. Set to 0
+# to fail fast against a flapping or unreachable backend.
+max_retries = 3
 ```
 
 ```bash
@@ -291,11 +296,9 @@ ollama pull gemma4:31b
                             │  muninn daemon           │
                             │   ┌─────────────────┐    │
                             │   │ MuninnEngine    │    │
+                            │   │  complete (RLM) │    │
                             │   │  search_code    │    │
                             │   │  query_graph    │    │
-                            │   │  search_docs    │    │
-                            │   │  explore (RLM)  │    │
-                            │   │  complete       │    │
                             │   └────────┬────────┘    │
                             └────────────┼─────────────┘
                                          ▼

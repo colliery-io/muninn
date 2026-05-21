@@ -12,7 +12,7 @@ derived from the engine DTOs in `crates/muninn-core/src/types.rs` via
 | Tool | Use when… |
 |------|-----------|
 | [`search_code`](#search_code) | You want ranked, scoped text/regex matches in the working tree. |
-| [`query_graph`](#query_graph) | You need to reason about call relationships: callers, callees, definitions, references. |
+| [`query_graph`](#query_graph) | You need to reason about call relationships: callers, callees, definitions. (`references` is on the schema but currently returns an error — see "Implementation status" below.) |
 
 `explore` (the recursive engine) is intentionally *not* surfaced via
 MCP — it's the expensive code path, and an LLM planner is prone to
@@ -90,6 +90,19 @@ Each `SearchHit` has `path`, `line`, `snippet`.
 | `max_hops` | u32 | no | Maximum graph hops. Engine default if unset. |
 
 **Output** (`GraphResult`): `nodes: GraphNode[]`, `edges: GraphEdge[]`.
+
+**Implementation status:**
+
+| `kind` | Status |
+|--------|--------|
+| `callers` | wired against the graph store |
+| `callees` | wired against the graph store |
+| `defines` | wired (returns the definition node(s) found by name lookup) |
+| `references` | **schema-only in v1** — returns an explicit "not yet implemented" error. Tracked in PROJEC-T-0078. |
+
+If the graph index is empty (fresh checkout, never indexed), all
+kinds return an empty `{ nodes: [], edges: [] }` rather than an
+error. Populate via `muninn index` first.
 
 **Examples:**
 
