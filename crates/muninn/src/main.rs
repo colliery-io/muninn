@@ -1147,8 +1147,13 @@ max_duration_secs = 300
 # uncomment in place, or paste a fresh block.
 
 # [ollama]
-# api_key = "..."                              # Ollama Cloud
-# base_url = "http://localhost:11434/v1"       # or local Ollama
+# api_key = "..."                              # Ollama Cloud key — leave base_url commented to talk to Ollama Cloud.
+
+# For LOCAL Ollama instead of Ollama Cloud, uncomment BOTH lines below.
+# The Ollama Cloud key above must then be commented out (or it will be
+# sent as a stray bearer token to a server that doesn't want it).
+# [ollama]
+# base_url = "http://localhost:11434/v1"
 
 # [groq]
 # api_key = "gsk_..."
@@ -1661,7 +1666,22 @@ max_duration_secs = 300
         }
 
         Commands::Daemon { command } => {
-            init_logging(cli.verbose);
+            // For `daemon start`, route logs to a rolling file under
+            // `.muninn/logs/` so failures inside the spawned daemon
+            // are diagnosable. `ensure_daemon` nulls the child's
+            // stdout/stderr, so without file logging the daemon is
+            // invisible. For other daemon subcommands (`status`,
+            // `stop`, `ensure`) keep stderr logging — those run in
+            // the user's foreground shell.
+            if matches!(command, DaemonCommand::Start { .. }) {
+                let muninn_dir = config_dir
+                    .as_deref()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from(config::MUNINN_DIR));
+                init_file_logging(&muninn_dir, cli.verbose);
+            } else {
+                init_logging(cli.verbose);
+            }
             run_daemon_command(command, &config, config_dir.as_deref()).await?;
         }
 
@@ -2066,6 +2086,26 @@ async fn run_daemon_command(
         }
         DaemonCommand::Ensure { socket } => {
             let path = resolve_daemon_socket(socket, config_dir);
+
+            // If the daemon is already alive but the config file has
+            // been modified since the daemon started, the running
+            // daemon is using a stale config snapshot. Stop it so the
+            // spawn below picks up the current config. Without this,
+            // edits to .muninn/config.toml (e.g. adding api_key after
+            // an initial dry-run boot) silently don't take effect.
+            if muninn_rlm::daemon::is_alive(&path).await {
+                let pid_file = path.with_extension("sock.pid");
+                let staleness = (|| -> Option<()> {
+                    let cfg_path = config_dir?.join(config::CONFIG_FILE);
+                    let cfg_mtime = std::fs::metadata(&cfg_path).ok()?.modified().ok()?;
+                    let pid_mtime = std::fs::metadata(&pid_file).ok()?.modified().ok()?;
+                    (cfg_mtime > pid_mtime).then_some(())
+                })();
+                if staleness.is_some() {
+                    info!("config modified after daemon start; restarting to pick up changes");
+                    let _ = muninn_rlm::daemon::stop_daemon(&path).await;
+                }
+            }
 
             // Pre-validate the config so credential / provider errors
             // surface as actionable messages instead of as a 10s
