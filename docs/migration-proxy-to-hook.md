@@ -51,7 +51,7 @@ duplicate logic.
 3. **Explicit MCP tools.** When the agent does want to ask muninn
    directly — "search docs for tokio joinsets", "who calls this
    function" — the MCP server surfaces `search_code`, `query_graph`,
-   `recall_memory`, and `search_docs` as first-class tools.
+   and `search_docs` as first-class tools.
 4. **No proxy bypass needed for non-Claude calls.** Muninn doesn't
    sit in the request path on the CC side anymore — you can leave
    `muninn proxy` running for your other tools without it interfering

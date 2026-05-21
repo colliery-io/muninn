@@ -1,19 +1,24 @@
-//! UAT — UserPromptSubmit hook round-trip.
+//! UAT — UserPromptSubmit hook and engine memory plumbing.
 //!
-//! Exercises the new turn-start hook end-to-end:
+//! The current UserPromptSubmit design fires a brief RLM exploration
+//! of the user's prompt and injects the summary as
+//! `additionalContext`. End-to-end exercise of that path requires
+//! the hook to reach the test daemon, which currently goes through
+//! the repo-scoped socket discovery — so it isn't trivial to drive
+//! against an isolated tempdir socket without a hook-socket
+//! override. The cross-process happy path will land alongside that
+//! override.
 //!
-//! 1. Bring up a real daemon (so the in-memory store has a place to
-//!    live for the duration of the test).
-//! 2. Record a deterministic memory entry via the daemon IPC client.
-//! 3. Spawn `muninn hook submit` with a CC UserPromptSubmit payload
-//!    whose `prompt` matches the recorded entry.
-//! 4. Assert the response is an Augment envelope whose
-//!    `additionalContext` includes the recorded content.
+//! What this file does cover today:
 //!
-//! Gated `#[ignore]` because:
-//! - the daemon needs credentials (gemma4:31b is the default
-//!   backend, even though this test never actually invokes the LLM);
-//! - the test spawns subprocesses, which belongs in the UAT pipeline.
+//! 1. `daemon_memory_round_trip_via_ipc` — engine-level regression
+//!    test that proves recall_memory / record_memory work through
+//!    the daemon IPC boundary. Memory is no longer surfaced as a v1
+//!    user feature, but the trait methods exist and are exercised
+//!    here so the wiring doesn't bit-rot.
+//! 2. `submit_returns_passthrough_when_daemon_unreachable` — sanity
+//!    check that the hook degrades cleanly when the daemon socket
+//!    the hook resolves doesn't match a live daemon.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -174,25 +179,21 @@ fn run_hook_submit(socket: &std::path::Path, stdin_payload: &str) -> (i32, Strin
     )
 }
 
-/// Smoke test: spawn the daemon, hit `muninn hook submit` with a
-/// real prompt and an empty memory store. We expect a clean
-/// passthrough (exit 0, empty stdout) — the recall_memory call
-/// returns no hits, so format_augment_block returns None.
+/// Sanity test: the hook resolves a *repo-scoped* socket path that
+/// doesn't match the isolated tempdir socket the test daemon binds
+/// to — so the daemon-alive probe in `submit_inner` returns false
+/// and the hook degrades to passthrough (exit 0, empty stdout).
 ///
-/// This is the regression test for the silent-passthrough contract
-/// of the new hook, exercised against a real daemon (not a stub).
-///
-/// Currently skipped: the hook resolves the daemon socket from
-/// config_dir → repo root → socket_path_for_repo, which doesn't
-/// match the per-test isolated socket we spin up. Wiring an env-var
-/// override into the hook would close this gap; for now the
-/// failure-mode shell tests in hook_failure_modes.rs cover the
-/// shell-level contract and the trait-level unit tests in
-/// muninn-rlm cover the engine round-trip.
+/// This proves the silent-passthrough contract holds when the
+/// daemon at the canonical path is absent — which is the most
+/// common failure path in production too. The "hook actually fires
+/// RLM and injects a preamble" path waits on a hook-socket
+/// override that lets tests bring up a daemon at a path the hook
+/// will pick.
 #[test]
-#[ignore = "UAT — UserPromptSubmit; needs hook socket override wiring (follow-up)"]
-fn submit_returns_passthrough_against_empty_store() {
-    if skip_if_no_backend("submit_returns_passthrough_against_empty_store") {
+#[ignore = "UAT — UserPromptSubmit silent-passthrough; invoke via `angreal test uat`"]
+fn submit_returns_passthrough_when_daemon_unreachable() {
+    if skip_if_no_backend("submit_returns_passthrough_when_daemon_unreachable") {
         return;
     }
     let sock = isolated_socket();

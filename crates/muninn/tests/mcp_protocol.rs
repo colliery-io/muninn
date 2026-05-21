@@ -203,7 +203,9 @@ impl Drop for McpClient {
 
 /// Full handshake: `initialize` succeeds, the server reports its
 /// own name/version, and `tools/list` advertises the curated muninn
-/// surface (search_code / query_graph / recall_memory / search_docs).
+/// surface (search_code / query_graph / search_docs). `recall_memory`
+/// is excluded in v1 — memory has no real write source, so
+/// advertising it would surface a tool that always returns empty.
 #[test]
 #[ignore = "UAT — MCP stdio protocol; invoke via `angreal test uat`"]
 fn mcp_initialize_and_list_tools() {
@@ -243,18 +245,23 @@ fn mcp_initialize_and_list_tools() {
         .iter()
         .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
         .collect();
-    let expected = ["search_code", "query_graph", "recall_memory", "search_docs"];
+    let expected = ["search_code", "query_graph", "search_docs"];
     for want in expected {
         assert!(
             names.iter().any(|n| n == want),
             "tools/list missing {want}; got {names:?}"
         );
     }
-    // And `explore` is deliberately not surfaced — verifies the
-    // PROJEC-T-0067 decision is still in effect.
+    // `explore` is deliberately not surfaced (PROJEC-T-0067).
     assert!(
         !names.iter().any(|n| n == "explore"),
-        "explore should not be exposed via MCP (PROJEC-T-0067), got {names:?}"
+        "explore should not be exposed via MCP, got {names:?}"
+    );
+    // `recall_memory` is not surfaced in v1 — memory store has no
+    // user-facing write source so advertising it would be misleading.
+    assert!(
+        !names.iter().any(|n| n == "recall_memory"),
+        "recall_memory should not be exposed via MCP in v1, got {names:?}"
     );
 }
 

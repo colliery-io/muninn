@@ -13,15 +13,19 @@ derived from the engine DTOs in `crates/muninn-core/src/types.rs` via
 |------|-----------|
 | [`search_code`](#search_code) | You want ranked, scoped text/regex matches in the working tree. |
 | [`query_graph`](#query_graph) | You need to reason about call relationships: callers, callees, definitions, references. |
-| [`recall_memory`](#recall_memory) | You want context muninn has previously stored about this repo (decisions, observations, prior explorations). |
 | [`search_docs`](#search_docs) | You need API or usage info for an indexed library on crates.io or PyPI. |
 
-`explore` (the recursive engine) is **not exposed via MCP** — it's the
-expensive code path and an LLM planner is prone to calling it for vague
-questions, blowing through budget. The hook plugin (PROJEC-T-0070) drives
-`explore` directly when its decision model determines a rewrite is
-warranted. If a concrete MCP use case appears, a future tool will surface
-it with explicit budget arguments.
+Two tools are intentionally *not* surfaced via MCP:
+
+- `explore` (the recursive engine) — expensive code path; an LLM
+  planner is prone to calling it for vague questions and blowing
+  through budget. The proxy + UserPromptSubmit hook drive `explore`
+  internally when they decide it's appropriate, so the agent gets
+  the value without being able to over-invoke it.
+- `recall_memory` — the memory store has no user-facing write source
+  in v1, so advertising the tool would surface a feature that always
+  returns empty. The trait method exists and works; it's just not
+  exposed to agents until there's a clear write story.
 
 ## Stability
 
@@ -93,24 +97,6 @@ Each `SearchHit` has `path`, `line`, `snippet`.
 
 ```json
 { "target": "crates/muninn/src/main.rs:71", "kind": "defines", "max_hops": 1 }
-```
-
-### `recall_memory`
-
-> Use this to look up prior decisions, observations, or context muninn
-> has stored about this repo (ADR-style notes, architecture facts, past
-> explorations). Returns ranked memory hits. Pair with `record_memory`
-> when you discover something worth keeping.
-
-**Input** (`MemoryQuery`): `query: string`, optional `limit`.
-
-**Output**: `{ "hits": MemoryHit[] }` where each hit has `id`, `content`,
-`score`.
-
-**Example:**
-
-```json
-{ "query": "how does the proxy handle OAuth?", "limit": 3 }
 ```
 
 ### `search_docs`

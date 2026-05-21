@@ -2,7 +2,7 @@
 //!
 //! Exposes the curated engine surface defined by
 //! [`muninn_core::tool_schemas`] (PROJEC-T-0067) — `search_code`,
-//! `query_graph`, `recall_memory`, `search_docs` — over the Model
+//! `query_graph`, `search_docs` — over the Model
 //! Context Protocol stdio transport. Each tool call dispatches to the
 //! matching trait method on the wrapped engine; the engine is
 //! typically a [`muninn_core::daemon::DaemonClient`] connected to a
@@ -198,7 +198,7 @@ pub async fn run_engine_mcp_server(engine: SharedEngine) -> Result<()> {
             title: Some("Muninn engine".to_string()),
             description: Some(
                 "Privacy-first recursive context gateway. Exposes search_code, \
-                 query_graph, recall_memory, and search_docs over MCP."
+                 query_graph, and search_docs over MCP."
                     .to_string(),
             ),
             icons: vec![],
@@ -306,8 +306,9 @@ mod tests {
         let names: Vec<&'static str> = tool_schemas().iter().map(|s| s.name).collect();
         assert!(names.contains(&"search_code"));
         assert!(names.contains(&"query_graph"));
-        assert!(names.contains(&"recall_memory"));
         assert!(names.contains(&"search_docs"));
+        // recall_memory is intentionally absent in v1.
+        assert!(!names.contains(&"recall_memory"));
         // Sanity: keep the handler alive in the test to ensure
         // construction works.
         let _h = handler();

@@ -1969,15 +1969,22 @@ struct UserPromptInput {
 }
 
 /// Body of `muninn hook submit`. Fires once per user turn before
-/// Claude starts. The decision shape is simpler than `hook decide`:
-/// passthrough or augment. (No rewrite — there's no original tool
-/// call to short-circuit at this point in CC's lifecycle.)
+/// Claude starts. Drives a brief RLM exploration of the user's
+/// prompt against the cheap configured backend and injects the
+/// resulting summary as `additionalContext`. The point is to off-load
+/// "go find the relevant files and patterns" from Claude to muninn's
+/// local model — Claude then composes its response with the
+/// exploration findings already in context.
+///
+/// Failure mode is silent passthrough (NFR-002): if the daemon is
+/// down, the model errors, or the exploration runs over budget, the
+/// user's turn proceeds without muninn pre-injection.
 async fn run_hook_submit(config: &Config, config_dir: Option<&std::path::Path>) {
-    // Generous outer cap: the user is waiting for Claude's first
-    // token anyway, so a couple hundred ms of muninn pre-injection is
-    // an acceptable trade for a turn-shaped context block. Still
-    // bounded so a hung backend can't strand the user.
-    const SUBMIT_DEADLINE: std::time::Duration = std::time::Duration::from_millis(2000);
+    // Generous outer cap. The user is already waiting for Claude's
+    // first token, so 30s of pre-exploration is acceptable when the
+    // payoff is "Claude already knows which files to touch." Still
+    // bounded so a hung daemon can't strand the turn.
+    const SUBMIT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
     let outcome = tokio::time::timeout(SUBMIT_DEADLINE, submit_inner(config, config_dir)).await;
 
@@ -1994,6 +2001,30 @@ async fn run_hook_submit(config: &Config, config_dir: Option<&std::path::Path>) 
     };
     response.write_to_stdout_for_event("UserPromptSubmit");
 }
+
+/// System-prompt-ish guidance prepended to the user's prompt when we
+/// drive the engine for context pre-loading. The engine replaces the
+/// caller's `system` field with its own `CORE_RLM_BEHAVIOR`, so we
+/// can't inject through `system`. Embedding the instruction in the
+/// user message gets the engine to follow it while still letting its
+/// FINAL(...) termination pattern kick in.
+const SUBMIT_PRIMER_INSTRUCTION: &str = "\
+[muninn turn-start primer mode]\n\
+\n\
+You are pre-loading code context for Claude Code so the agent doesn't \
+have to discover it itself. Do NOT try to answer the user's question \
+— that's Claude's job. Instead, briefly explore the project and \
+surface the files, symbols, and patterns most relevant to the prompt \
+below.\n\
+\n\
+Constraints:\n\
+- Use 1–3 tool calls. Stop early.\n\
+- Keep your output under 500 tokens.\n\
+- Cite specific file paths and line numbers when you find them.\n\
+- If the prompt clearly doesn't need code context (greeting, math, \
+  generic question), output FINAL(no project context needed) and \
+  stop.\n\
+- End with FINAL(<your concise summary>).";
 
 async fn submit_inner(
     config: &Config,
@@ -2016,29 +2047,70 @@ async fn submit_inner(
         return Ok(HookResponse::Passthrough);
     }
 
-    // Try the retrieval block — recall_memory + query_graph through
-    // the daemon. If the daemon isn't up or nothing useful comes
-    // back, fall through to passthrough.
+    // Connect to the daemon. We deliberately do NOT auto-spawn — the
+    // cold-start cost on top of an RLM exploration would blow the
+    // outer 30s deadline. If no daemon is up, degrade to passthrough.
     let socket = hook_socket_path(config, config_dir);
-    // The hint into retrieval is the user prompt itself. No tool
-    // args yet (PreToolUse hasn't fired), so we just treat the prompt
-    // as the augment_hint.
-    let block = hook::try_build_augment_block(
-        &socket,
-        "UserPromptSubmit",
-        // tool_input is empty — extract_graph_target() returns None
-        // for unknown tool names, which is what we want here. Memory
-        // retrieval uses augment_hint, so we just pass the prompt.
-        &serde_json::Value::Null,
-        Some(prompt),
-    )
-    .await
-    .unwrap_or(None);
+    if !muninn_rlm::daemon::is_alive(&socket).await {
+        return Ok(HookResponse::Passthrough);
+    }
+    let client = muninn_rlm::daemon::DaemonClient::connect(&socket)
+        .await
+        .map_err(|e| anyhow::anyhow!("daemon connect: {e}"))?;
 
-    Ok(match block {
-        Some(b) => HookResponse::Augment(b),
-        None => HookResponse::Passthrough,
-    })
+    // Build a recursive CompletionRequest. The model + budget come
+    // from `[rlm]` (with [default] inheritance), matching what the
+    // proxy uses for the same loop. `muninn.recursive = true` is the
+    // flag the engine reads to enter its RLM loop.
+    let resolved = config.resolved_rlm();
+    let user_message = format!("{}\n\nUser prompt:\n{}", SUBMIT_PRIMER_INSTRUCTION, prompt);
+    let request = muninn_rlm::CompletionRequest::new(
+        &resolved.model,
+        vec![muninn_rlm::Message::user(user_message)],
+        1024,
+    )
+    .with_muninn(muninn_rlm::MuninnConfig::recursive());
+
+    let response = {
+        use muninn_rlm::MuninnEngine;
+        client
+            .complete(request)
+            .await
+            .map_err(|e| anyhow::anyhow!("primer complete: {e}"))?
+    };
+    let text = response.text();
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(HookResponse::Passthrough);
+    }
+
+    // Prefer the FINAL(...) capture if the model followed the
+    // protocol; otherwise relay the response body as-is.
+    let summary = extract_final_capture(trimmed).unwrap_or(trimmed.to_string());
+    let summary = summary.trim();
+    // Skip the explicit "no project context needed" sentinel — same
+    // as a clean passthrough.
+    if summary.is_empty() || summary.eq_ignore_ascii_case("no project context needed") {
+        return Ok(HookResponse::Passthrough);
+    }
+
+    let block = format!(
+        "─── Muninn context preamble ───\n\
+         {summary}\n\
+         ────────────────────────────────"
+    );
+    Ok(HookResponse::Augment(block))
+}
+
+/// Extract the FINAL(...) capture from an RLM response if present.
+/// Mirrors the engine's own pattern. Returns the inside, with
+/// surrounding quotes stripped.
+fn extract_final_capture(text: &str) -> Option<String> {
+    let re = regex::Regex::new(r#"(?m)^FINAL\(["']?([\s\S]+?)["']?\)$"#).ok()?;
+    re.captures(text)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Set up tracing for the MCP subcommand. Writes only to stderr —

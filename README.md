@@ -35,7 +35,7 @@ Muninn ships **two ways** to plug into your agent. They share the same engine; p
 
 | Surface | When to use | What it gives you |
 |---|---|---|
-| **Hook + MCP (Claude Code)** | You're using Claude Code (the primary recommendation). | A PreToolUse hook that augments / rewrites Grep / Read / Glob calls + an MCP server exposing `search_code`, `query_graph`, `recall_memory`, `search_docs`. Both backed by a single local daemon. Sanctioned by CC's own extension points. |
+| **Hook + MCP (Claude Code)** | You're using Claude Code (the primary recommendation). | A PreToolUse hook that augments / rewrites Grep / Read / Glob calls, a UserPromptSubmit hook that pre-loads project context once per user turn via a local model, and an MCP server exposing `search_code`, `query_graph`, `search_docs`. Backed by a single local daemon. Sanctioned by CC's own extension points. |
 | **Proxy (everyone else)** | Cursor / Continue / Aider / any OpenAI- or Anthropic-compatible client. | A drop-in HTTP proxy that intercepts requests and routes them through a recursive exploration engine when appropriate. Same engine, different adapter. |
 
 See [ADR-0003](.metis/adrs/PROJEC-A-0003.md) for the rationale behind keeping both.
@@ -130,7 +130,6 @@ Once installed, Claude Code can call:
 
 - **`search_code`** — ranked, scoped text/regex matches in the working tree
 - **`query_graph`** — callers / callees / definitions / references via the code graph
-- **`recall_memory`** — prior decisions and observations muninn has stored about this repo
 - **`search_docs`** — indexed library documentation (crates.io / PyPI)
 
 Full schema reference: [`docs/mcp-tools.md`](docs/mcp-tools.md).
@@ -316,7 +315,6 @@ ollama pull gemma4:31b
                             │   │ MuninnEngine    │    │
                             │   │  search_code    │    │
                             │   │  query_graph    │    │
-                            │   │  recall_memory  │    │
                             │   │  search_docs    │    │
                             │   │  explore (RLM)  │    │
                             │   │  complete       │    │

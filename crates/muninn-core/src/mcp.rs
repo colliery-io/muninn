@@ -18,6 +18,13 @@
 //!   is warranted. If/when there's a concrete need for an MCP-exposed
 //!   exploration tool, add one then — with explicit budget arguments
 //!   surfaced to the agent.
+//! - `recall_memory` / `record_memory` are **not** exposed via MCP in
+//!   v1. The memory store is per-developer local state (no shared
+//!   write source, no persistence in v1), so advertising it as an
+//!   MCP tool would surface a feature that always returns empty.
+//!   The trait methods exist and work — they're available to internal
+//!   callers (hooks, future tooling) — but the agent-facing surface
+//!   stays out of v1 until there's a clear write story.
 //! - Schemas derive from [`crate::types`] so the wire shape and the
 //!   trait surface can't drift.
 //!
@@ -78,7 +85,6 @@ pub fn tool_schemas() -> Vec<McpToolSchema> {
     vec![
         search_code_schema(),
         query_graph_schema(),
-        recall_memory_schema(),
         search_docs_schema(),
     ]
 }
@@ -139,6 +145,10 @@ this over Grep for call-chain reasoning.",
     }
 }
 
+// Kept as reference for future re-introduction once memory has a
+// real write source. Not in the live tool list — see the module-
+// level "v1 non-exposure" note.
+#[allow(dead_code)]
 fn recall_memory_schema() -> McpToolSchema {
     McpToolSchema {
         name: "recall_memory",
@@ -210,10 +220,7 @@ mod tests {
     #[test]
     fn tool_schemas_lists_all_expected_tools() {
         let names: Vec<&'static str> = tool_schemas().iter().map(|s| s.name).collect();
-        assert_eq!(
-            names,
-            vec!["search_code", "query_graph", "recall_memory", "search_docs"]
-        );
+        assert_eq!(names, vec!["search_code", "query_graph", "search_docs"]);
     }
 
     #[test]
@@ -224,6 +231,13 @@ mod tests {
         assert!(
             !names.contains(&"explore"),
             "explore should not be exposed via MCP"
+        );
+        // Memory is per-developer local state without a v1 write
+        // source; advertising recall_memory would surface a tool that
+        // always returns empty.
+        assert!(
+            !names.contains(&"recall_memory"),
+            "recall_memory should not be exposed via MCP in v1"
         );
     }
 
