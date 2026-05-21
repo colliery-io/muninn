@@ -342,9 +342,14 @@ fn submit_injects_answer_envelope_for_code_question() {
         ctx.contains("muninn turn-start answer"),
         "additionalContext missing answer-shaped framing: {ctx:?}"
     );
+    // The framing should steer the downstream agent toward using
+    // muninn's answer as the starting point. Original wording was
+    // "Do NOT re-grep" which proved too overbearing in live use; we
+    // assert the softer phrasing now, but keep the test so cosmetic
+    // refactors can't silently drop the steer entirely.
     assert!(
-        ctx.contains("Do NOT re-grep"),
-        "additionalContext missing don't-re-explore directive: {ctx:?}"
+        ctx.contains("Prefer it as your starting point"),
+        "additionalContext missing starting-point steer: {ctx:?}"
     );
     // The answer body should at least mention the actual symbol the
     // prompt asked about — proves the RLM produced something

@@ -1995,16 +1995,20 @@ async fn submit_inner(
     }
 
     // Answer-shaped framing: tell the downstream agent that muninn
-    // has done the work. Aggressive wording is intentional — without
-    // it Claude tends to re-grep "to verify," which defeats the
-    // off-load. Best-effort steer, not a hard block.
+    // has done the work. The wording softens what was originally a
+    // hard "Do NOT re-grep" directive — that came across as
+    // overbearing in live use and discouraged Claude from doing
+    // appropriate verification when the inject was approximate.
+    // The framing now offers the answer as a starting point and
+    // leaves verification judgment to the downstream agent.
     let block = format!(
         "─── muninn turn-start answer ───\n\
-         Muninn has already explored this repo on a local model and \
-         produced the answer below. You can deliver it directly to \
-         the user. Do NOT re-grep, re-read, or otherwise re-explore \
-         the codebase unless you have a concrete reason to doubt \
-         what muninn found.\n\
+         Muninn explored this repo on a local model and produced the \
+         answer below. Prefer it as your starting point rather than \
+         re-doing the same exploration — line numbers may be \
+         approximate, but file paths, structural claims, and verbatim \
+         code snippets are reliable. Verify what you'd reasonably \
+         double-check before acting; skip what you wouldn't.\n\
          \n\
          {answer}\n\
          ─────────────────────────────────"
