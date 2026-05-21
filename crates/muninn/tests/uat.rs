@@ -26,9 +26,7 @@ use std::time::{Duration, Instant};
 /// var isn't set; the caller can early-return.
 fn skip_if_missing(var: &str, test_name: &str) -> bool {
     if std::env::var_os(var).is_none() {
-        eprintln!(
-            "[uat::{test_name}] skipping: {var} not set — run via `angreal test uat`"
-        );
+        eprintln!("[uat::{test_name}] skipping: {var} not set — run via `angreal test uat`");
         true
     } else {
         false

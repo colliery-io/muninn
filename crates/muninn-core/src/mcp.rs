@@ -38,10 +38,7 @@ use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::types::{
-    DocsQuery, DocsResult, GraphQuery, GraphResult, MemoryHit, MemoryQuery, SearchQuery,
-    SearchResult,
-};
+use crate::types::{DocsQuery, DocsResult, GraphQuery, GraphResult, SearchQuery, SearchResult};
 
 /// Stability classification for a tool schema.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -141,49 +138,6 @@ this over Grep for call-chain reasoning.",
                 "max_hops": 1
             }),
         ],
-        stability: SchemaStability::Stable,
-    }
-}
-
-// Kept as reference for future re-introduction once memory has a
-// real write source. Not in the live tool list — see the module-
-// level "v1 non-exposure" note.
-#[allow(dead_code)]
-fn recall_memory_schema() -> McpToolSchema {
-    McpToolSchema {
-        name: "recall_memory",
-        description: "\
-Use this to look up prior decisions, observations, or context muninn has \
-stored about this repo (ADR-style notes, architecture facts, past \
-explorations). Returns ranked memory hits. Pair with record_memory when \
-you discover something worth keeping.",
-        input_schema: schema_value::<MemoryQuery>(),
-        output_schema: {
-            // recall_memory returns Vec<MemoryHit> — wrap it in the
-            // standard `{ "hits": [...] }` shape for MCP, matching how
-            // other tools surface lists.
-            let mut wrapper = schemars::schema::SchemaObject::default();
-            wrapper.metadata().title = Some("RecallMemoryResult".into());
-            wrapper.object().properties.insert(
-                "hits".into(),
-                schemars::schema::Schema::Object(schemars::schema::SchemaObject {
-                    instance_type: Some(schemars::schema::InstanceType::Array.into()),
-                    array: Some(Box::new(schemars::schema::ArrayValidation {
-                        items: Some(schemars::schema::SingleOrVec::Single(Box::new(
-                            schema_for!(MemoryHit).schema.into(),
-                        ))),
-                        ..Default::default()
-                    })),
-                    ..Default::default()
-                }),
-            );
-            wrapper.object().required.insert("hits".into());
-            serde_json::to_value(wrapper).expect("schema serialization is infallible")
-        },
-        examples: vec![serde_json::json!({
-            "query": "how does the proxy handle OAuth?",
-            "limit": 3
-        })],
         stability: SchemaStability::Stable,
     }
 }

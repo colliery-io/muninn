@@ -34,7 +34,7 @@ use tracing::info;
 
 use muninn_core::{
     SharedEngine, tool_schemas,
-    types::{DocsQuery, GraphQuery, MemoryQuery, SearchQuery},
+    types::{DocsQuery, GraphQuery, SearchQuery},
 };
 
 use crate::error::{Result, RlmError};
@@ -152,18 +152,6 @@ impl ServerHandler for EngineServerHandler {
                         "query_graph arguments: {e}"
                     ))),
                 },
-                "recall_memory" => match serde_json::from_value::<MemoryQuery>(args) {
-                    Ok(q) => match self.engine.recall_memory(q).await {
-                        // Wrap Vec<MemoryHit> as { "hits": [...] } to match
-                        // the documented MCP output shape (see T-0067).
-                        Ok(hits) => serde_json::to_value(serde_json::json!({ "hits": hits }))
-                            .map_err(|e| RlmError::Serialization(e.to_string())),
-                        Err(e) => Err(RlmError::ToolExecution(e.to_string())),
-                    },
-                    Err(e) => Err(RlmError::InvalidRequest(format!(
-                        "recall_memory arguments: {e}"
-                    ))),
-                },
                 "search_docs" => match serde_json::from_value::<DocsQuery>(args) {
                     Ok(q) => match self.engine.search_docs(q).await {
                         Ok(r) => serde_json::to_value(r)
@@ -243,8 +231,8 @@ pub async fn run_engine_mcp_server(engine: SharedEngine) -> Result<()> {
 mod tests {
     use super::*;
     use muninn_core::types::{
-        DocsResult, ExploreRequest, ExploreResult, GraphResult, MemoryHit, MemoryItem, SearchHit,
-        SearchResult,
+        DocsResult, ExploreRequest, ExploreResult, GraphResult, MemoryHit, MemoryItem, MemoryQuery,
+        SearchHit, SearchResult,
     };
     use muninn_core::{
         CompletionRequest, CompletionResponse, MuninnEngine, error::Result as CoreResult,

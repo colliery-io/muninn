@@ -1,21 +1,24 @@
 //! UAT — UserPromptSubmit hook and engine memory plumbing.
 //!
-//! The current UserPromptSubmit design fires a brief RLM exploration
-//! of the user's prompt and injects the summary as
-//! `additionalContext`. End-to-end exercise of that path requires
-//! the hook to reach the test daemon, which currently goes through
-//! the repo-scoped socket discovery — so it isn't trivial to drive
-//! against an isolated tempdir socket without a hook-socket
-//! override. The cross-process happy path will land alongside that
-//! override.
+//! The current UserPromptSubmit design is a two-stage filter:
+//! 1. Router decision (cheap LLM call): passthrough vs rlm
+//! 2. On rlm: drive recursive exploration on the local model and
+//!    inject the result as `additionalContext`, framed as an answer
+//!    rather than advisory context.
 //!
-//! What this file does cover today:
+//! End-to-end exercise of that path requires the hook to reach a
+//! test daemon, which currently goes through the repo-scoped socket
+//! discovery — so it isn't trivial to drive against an isolated
+//! tempdir socket without a hook-socket override. The cross-process
+//! happy path will land alongside that override.
+//!
+//! What this file covers today:
 //!
 //! 1. `daemon_memory_round_trip_via_ipc` — engine-level regression
-//!    test that proves recall_memory / record_memory work through
-//!    the daemon IPC boundary. Memory is no longer surfaced as a v1
-//!    user feature, but the trait methods exist and are exercised
-//!    here so the wiring doesn't bit-rot.
+//!    test that proves `recall_memory` / `record_memory` work through
+//!    the daemon IPC boundary. Memory is no longer a v1 user feature,
+//!    but the trait methods are wired and exercised here so the
+//!    plumbing doesn't bit-rot before v2.
 //! 2. `submit_returns_passthrough_when_daemon_unreachable` — sanity
 //!    check that the hook degrades cleanly when the daemon socket
 //!    the hook resolves doesn't match a live daemon.

@@ -2002,29 +2002,27 @@ async fn run_hook_submit(config: &Config, config_dir: Option<&std::path::Path>) 
     response.write_to_stdout_for_event("UserPromptSubmit");
 }
 
-/// System-prompt-ish guidance prepended to the user's prompt when we
-/// drive the engine for context pre-loading. The engine replaces the
-/// caller's `system` field with its own `CORE_RLM_BEHAVIOR`, so we
-/// can't inject through `system`. Embedding the instruction in the
-/// user message gets the engine to follow it while still letting its
-/// FINAL(...) termination pattern kick in.
-const SUBMIT_PRIMER_INSTRUCTION: &str = "\
-[muninn turn-start primer mode]\n\
+/// User-message prefix when we drive the engine for the
+/// answer-shaped RLM exploration. The engine replaces the caller's
+/// `system` field with `CORE_RLM_BEHAVIOR`, so we embed the
+/// instructions in the user message instead. The framing is
+/// deliberately strong: muninn is producing the *answer* the
+/// downstream agent should deliver, not advisory context for it to
+/// re-verify.
+const SUBMIT_RLM_INSTRUCTION: &str = "\
+[muninn turn-start exploration]\n\
 \n\
-You are pre-loading code context for Claude Code so the agent doesn't \
-have to discover it itself. Do NOT try to answer the user's question \
-— that's Claude's job. Instead, briefly explore the project and \
-surface the files, symbols, and patterns most relevant to the prompt \
-below.\n\
+You are answering this user prompt on behalf of muninn so the \
+downstream agent (Claude Code) can deliver the answer without \
+re-exploring the codebase. Investigate the repo as needed and \
+produce a complete, action-ready answer.\n\
 \n\
 Constraints:\n\
-- Use 1–3 tool calls. Stop early.\n\
-- Keep your output under 500 tokens.\n\
-- Cite specific file paths and line numbers when you find them.\n\
-- If the prompt clearly doesn't need code context (greeting, math, \
-  generic question), output FINAL(no project context needed) and \
-  stop.\n\
-- End with FINAL(<your concise summary>).";
+- Cite specific file paths and line numbers when relevant.\n\
+- If the prompt asks for code changes, include the concrete edit \
+  plan (file path + the diff or the replacement snippet).\n\
+- Keep the final answer focused and under ~800 tokens.\n\
+- End with FINAL(<the complete answer>).";
 
 async fn submit_inner(
     config: &Config,
@@ -2048,8 +2046,8 @@ async fn submit_inner(
     }
 
     // Connect to the daemon. We deliberately do NOT auto-spawn — the
-    // cold-start cost on top of an RLM exploration would blow the
-    // outer 30s deadline. If no daemon is up, degrade to passthrough.
+    // cold-start cost on top of router + RLM would blow the deadline.
+    // If no daemon is up, degrade to passthrough.
     let socket = hook_socket_path(config, config_dir);
     if !muninn_rlm::daemon::is_alive(&socket).await {
         return Ok(HookResponse::Passthrough);
@@ -2058,25 +2056,63 @@ async fn submit_inner(
         .await
         .map_err(|e| anyhow::anyhow!("daemon connect: {e}"))?;
 
-    // Build a recursive CompletionRequest. The model + budget come
-    // from `[rlm]` (with [default] inheritance), matching what the
-    // proxy uses for the same loop. `muninn.recursive = true` is the
-    // flag the engine reads to enter its RLM loop.
-    let resolved = config.resolved_rlm();
-    let user_message = format!("{}\n\nUser prompt:\n{}", SUBMIT_PRIMER_INSTRUCTION, prompt);
-    let request = muninn_rlm::CompletionRequest::new(
-        &resolved.model,
+    // ── Stage 1: router gate ──
+    //
+    // Reuse the proxy's router with its tuned RLM-biased prompt. The
+    // router runs against the resolved `[router]` model (cheap by
+    // default; small fast model). Passthrough cases skip the
+    // expensive RLM call entirely.
+    let resolved_router = config.resolved_router();
+    let router_backend = create_backend_from_config(
+        &resolved_router.provider,
+        &resolved_router.model,
+        config,
+        config_dir,
+    )?
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "no router backend (provider={}, model={})",
+            resolved_router.provider,
+            resolved_router.model
+        )
+    })?;
+    let router = muninn_rlm::Router::with_config(muninn_rlm::RouterConfig {
+        strategy: muninn_rlm::RouterStrategy::Llm,
+        enabled: true,
+        router_model: Some(resolved_router.model.clone()),
+    })
+    .with_llm(router_backend);
+
+    let probe_request = muninn_rlm::CompletionRequest::new(
+        &resolved_router.model,
+        vec![muninn_rlm::Message::user(prompt)],
+        128,
+    );
+    let decision = router.route(&probe_request).await;
+    if decision.is_passthrough() {
+        return Ok(HookResponse::Passthrough);
+    }
+
+    // ── Stage 2: RLM exploration via the daemon ──
+    //
+    // Router said "code context matters." Drive the recursive engine
+    // to produce a complete answer; muninn replaces Claude's
+    // exploration work for this turn.
+    let resolved_rlm = config.resolved_rlm();
+    let user_message = format!("{}\n\nUser prompt:\n{}", SUBMIT_RLM_INSTRUCTION, prompt);
+    let rlm_request = muninn_rlm::CompletionRequest::new(
+        &resolved_rlm.model,
         vec![muninn_rlm::Message::user(user_message)],
-        1024,
+        2048,
     )
     .with_muninn(muninn_rlm::MuninnConfig::recursive());
 
     let response = {
         use muninn_rlm::MuninnEngine;
         client
-            .complete(request)
+            .complete(rlm_request)
             .await
-            .map_err(|e| anyhow::anyhow!("primer complete: {e}"))?
+            .map_err(|e| anyhow::anyhow!("rlm complete: {e}"))?
     };
     let text = response.text();
     let trimmed = text.trim();
@@ -2084,27 +2120,35 @@ async fn submit_inner(
         return Ok(HookResponse::Passthrough);
     }
 
-    // Prefer the FINAL(...) capture if the model followed the
-    // protocol; otherwise relay the response body as-is.
-    let summary = extract_final_capture(trimmed).unwrap_or(trimmed.to_string());
-    let summary = summary.trim();
-    // Skip the explicit "no project context needed" sentinel — same
-    // as a clean passthrough.
-    if summary.is_empty() || summary.eq_ignore_ascii_case("no project context needed") {
+    // Prefer the FINAL(...) capture; otherwise relay the body.
+    let answer = extract_final_capture(trimmed)
+        .unwrap_or_else(|| trimmed.to_string())
+        .trim()
+        .to_string();
+    if answer.is_empty() {
         return Ok(HookResponse::Passthrough);
     }
 
+    // Answer-shaped framing: tell the downstream agent that muninn
+    // has done the work. Aggressive wording is intentional — without
+    // it Claude tends to re-grep "to verify," which defeats the
+    // off-load. Best-effort steer, not a hard block.
     let block = format!(
-        "─── Muninn context preamble ───\n\
-         {summary}\n\
-         ────────────────────────────────"
+        "─── muninn turn-start answer ───\n\
+         Muninn has already explored this repo on a local model and \
+         produced the answer below. You can deliver it directly to \
+         the user. Do NOT re-grep, re-read, or otherwise re-explore \
+         the codebase unless you have a concrete reason to doubt \
+         what muninn found.\n\
+         \n\
+         {answer}\n\
+         ─────────────────────────────────"
     );
     Ok(HookResponse::Augment(block))
 }
 
 /// Extract the FINAL(...) capture from an RLM response if present.
-/// Mirrors the engine's own pattern. Returns the inside, with
-/// surrounding quotes stripped.
+/// Mirrors the engine's own pattern.
 fn extract_final_capture(text: &str) -> Option<String> {
     let re = regex::Regex::new(r#"(?m)^FINAL\(["']?([\s\S]+?)["']?\)$"#).ok()?;
     re.captures(text)

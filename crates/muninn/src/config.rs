@@ -572,9 +572,7 @@ impl Config {
                 });
         }
 
-        if (router.provider == "ollama"
-            || rlm.provider == "ollama"
-            || hook.provider == "ollama")
+        if (router.provider == "ollama" || rlm.provider == "ollama" || hook.provider == "ollama")
             && self.ollama.needs_api_key()
             && self.ollama.resolved_api_key().is_none()
         {
