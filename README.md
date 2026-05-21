@@ -69,11 +69,15 @@ This creates `.muninn/config.toml` with a sensible tiered config (Ollama Cloud +
 
 ### Step 3 — provide a backend credential
 
-The out-of-the-box config talks to Ollama Cloud. Get an [Ollama Cloud](https://ollama.com) API key (free tier works) and export it:
+The out-of-the-box config talks to Ollama Cloud. Get an [Ollama Cloud](https://ollama.com) API key (free tier works) and put it in your config:
 
-```bash
-export OLLAMA_API_KEY="..."
+```toml
+# .muninn/config.toml
+[ollama]
+api_key = "..."
 ```
+
+You can also export `OLLAMA_API_KEY` in your shell — but be aware: when Claude Code launches muninn's hook + MCP subprocesses, they may not inherit your interactive shell's environment (especially if you started CC from a desktop launcher rather than a terminal). Putting the key in `.muninn/config.toml` is the most reliable path. The same applies to `GROQ_API_KEY` / `ANTHROPIC_API_KEY`.
 
 For Groq, Anthropic direct, or a local Ollama daemon, see [Configuration](#configuration).
 

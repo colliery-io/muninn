@@ -1133,27 +1133,52 @@ max_depth = 5
 max_tool_calls = 50
 max_duration_secs = 300
 
-# Provider credentials (set here or use env vars)
-[ollama]
-# Ollama Cloud is the default. Set api_key or use OLLAMA_API_KEY env var.
-# To run against a local Ollama daemon instead, override base_url:
-# base_url = "http://localhost:11434/v1"
-# api_key = "..."
+# Provider credentials.
+#
+# Uncomment one block below to set credentials in this file, OR
+# export OLLAMA_API_KEY / GROQ_API_KEY / ANTHROPIC_API_KEY in the
+# environment muninn runs from. Note: Claude Code's hook + MCP
+# subprocesses may not inherit your interactive shell's env, so
+# in-file credentials are usually the most reliable.
+#
+# The section header AND fields are commented out together so that
+# adding a fresh `[ollama]` (etc.) section later in this file
+# won't be silently overridden by an empty section above. Either
+# uncomment in place, or paste a fresh block.
+
+# [ollama]
+# api_key = "..."                              # Ollama Cloud
+# base_url = "http://localhost:11434/v1"       # or local Ollama
 
 # [groq]
-# api_key = "gsk_..."  # Or use GROQ_API_KEY env var
+# api_key = "gsk_..."
 
 # [anthropic]
-# api_key = "sk-..."  # Or use ANTHROPIC_API_KEY env var
+# api_key = "sk-..."
 "#;
 
             std::fs::write(&config_path, default_config)?;
-            info!("Created {}", config_path.display());
-            info!("Next steps:");
-            info!("  1. Edit .muninn/config.toml to configure your project");
-            info!("  2. Run 'muninn index' to build the code graph");
-            info!("  3. Run 'muninn oauth' to authenticate with Claude MAX");
-            info!("  4. Run 'muninn claude' to start coding with context");
+            // Use println — `muninn init` is a one-shot command and
+            // doesn't initialize the tracing subscriber, so info!
+            // would silently swallow these.
+            println!("Initialized {}", muninn_dir.display());
+            println!("Wrote   {}", config_path.display());
+            println!();
+            println!("Next steps:");
+            println!(
+                "  1. Add a provider credential to .muninn/config.toml \
+                 (under [ollama]/[groq]/[anthropic] api_key), or export \
+                 OLLAMA_API_KEY / GROQ_API_KEY / ANTHROPIC_API_KEY in your \
+                 shell. The default config targets Ollama Cloud."
+            );
+            println!(
+                "  2. For Claude Code: `muninn install-cc`, then from inside CC \
+                 run `/plugin add-source ./plugins/muninn-cc`."
+            );
+            println!(
+                "  3. (Optional) `muninn index` to populate the code graph so \
+                 the MCP `query_graph` tool returns non-empty results."
+            );
         }
 
         Commands::Auth { status, logout } => {
@@ -2041,6 +2066,28 @@ async fn run_daemon_command(
         }
         DaemonCommand::Ensure { socket } => {
             let path = resolve_daemon_socket(socket, config_dir);
+
+            // Pre-validate the config so credential / provider errors
+            // surface as actionable messages instead of as a 10s
+            // "daemon did not come up within timeout" with no
+            // breadcrumb. The spawned daemon would fail with the
+            // same errors, but its stdout/stderr are nulled.
+            let errors = config.validate();
+            if !errors.is_empty() {
+                let mut msg =
+                    String::from("muninn daemon ensure: config validation failed before spawn:\n");
+                for e in &errors {
+                    msg.push_str(&format!("  - {e}\n"));
+                }
+                msg.push_str(
+                    "Fix the above and retry. Tip: set provider credentials \
+                     in your .muninn/config.toml (under [ollama]/[groq]/[anthropic] \
+                     api_key) rather than env vars when running from Claude Code — \
+                     CC's subprocess environment may not inherit shell exports.",
+                );
+                anyhow::bail!(msg);
+            }
+
             let exe = std::env::current_exe()
                 .map_err(|e| anyhow::anyhow!("locate muninn binary: {}", e))?;
             // Propagate --config so the spawned daemon reads the
