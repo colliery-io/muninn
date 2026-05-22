@@ -76,17 +76,26 @@ impl GraphBuilder {
 
     /// Resolve a call's `callee` expression to a node id.
     ///
-    /// Layered lookup: first the current file's local symbol map
-    /// (exact match, then short-name fallback after stripping the
-    /// scope qualifier), then a workspace-wide lookup against the
-    /// store via `find_by_name`. The workspace step is what catches
-    /// cross-file and cross-crate calls — at full-rebuild time the
-    /// second pass of `build_directory` sees a fully-populated
-    /// store so these lookups succeed; the watcher's incremental
-    /// path benefits too when the target lives in an already-indexed
-    /// file. Returns `None` if no resolution succeeded; the caller
-    /// decides whether to emit an unresolved placeholder (which
-    /// graphqlite then drops on insert).
+    /// Layered lookup, ordered from most-precise to least-precise.
+    /// Returns `None` if no step matches; the caller decides whether
+    /// to emit an unresolved placeholder (which graphqlite drops).
+    ///
+    /// 1. **Local exact match.** Catches intra-file calls like
+    ///    `foo()` resolving to a `foo` defined in the same file.
+    /// 2. **Qualified-name workspace match** (scoped calls only).
+    ///    For `muninn_rlm::daemon::socket_path_for_repo`, query the
+    ///    store for a symbol whose `qualified_name` is exactly that
+    ///    string. When the call's qualifier matches the defining
+    ///    crate's canonical path, this returns the right symbol
+    ///    with no ambiguity, even across crates.
+    /// 3. **Short-name local match.** For scoped calls where the
+    ///    full qualifier doesn't canonical-match (e.g. after a
+    ///    `use`), or for bare calls, try the local file's symbol
+    ///    map with just the last segment.
+    /// 4. **Short-name workspace match.** Last-resort fallback
+    ///    when none of the above match. Returns the first symbol
+    ///    that shares the short name; imprecise when multiple
+    ///    symbols share a name (`new`, `default`, etc.).
     fn resolve_callee_id(
         &self,
         callee: &str,
@@ -97,13 +106,28 @@ impl GraphBuilder {
         if let Some(s) = local_callables.get(callee) {
             return Some(s.id());
         }
-        // 2. Short-name local match (e.g. `foo::bar::baz` -> `baz`).
+
+        // 2. Qualified-name workspace match for scoped calls. We
+        //    only consult the store when the callee actually carries
+        //    a scope qualifier — bare calls have no qualified form
+        //    to match against.
+        if callee.contains(scope_separator) {
+            if let Ok(candidates) = self.store.find_by_qualified_name(callee) {
+                for c in &candidates {
+                    if let Some(id) = extract_node_id(c) {
+                        return Some(id);
+                    }
+                }
+            }
+        }
+
+        // 3. Short-name local match.
         let short = callee.rsplit(scope_separator).next().unwrap_or(callee);
         if let Some(s) = local_callables.get(short) {
             return Some(s.id());
         }
-        // 3. Workspace lookup via the store. Iterate matches and
-        //    prefer callable kinds; first match wins.
+
+        // 4. Short-name workspace match (last resort).
         if let Ok(candidates) = self.store.find_by_name(short) {
             for c in &candidates {
                 if let Some(id) = extract_node_id(c) {
@@ -119,14 +143,18 @@ impl GraphBuilder {
 /// graphqlite represents nodes as `Object({ "properties": Object({ "id": String, ... }) })`.
 /// Returns `None` if the shape doesn't match (defensive — should always match for store-returned values).
 fn extract_node_id(value: &graphqlite::Value) -> Option<String> {
+    extract_node_string_property(value, "id")
+}
+
+fn extract_node_string_property(value: &graphqlite::Value, key: &str) -> Option<String> {
     if let graphqlite::Value::Object(map) = value {
         if let Some(graphqlite::Value::Object(props)) = map.get("properties") {
-            if let Some(graphqlite::Value::String(id)) = props.get("id") {
-                return Some(id.clone());
+            if let Some(graphqlite::Value::String(s)) = props.get(key) {
+                return Some(s.clone());
             }
         }
-        if let Some(graphqlite::Value::String(id)) = map.get("id") {
-            return Some(id.clone());
+        if let Some(graphqlite::Value::String(s)) = map.get(key) {
+            return Some(s.clone());
         }
     }
     None
@@ -834,6 +862,104 @@ pub fn workspace_target() -> i32 {
         assert!(
             resolved.unwrap().contains("workspace_target"),
             "resolved id should reference the workspace_target node"
+        );
+    }
+
+    /// Exact-resolution test: two functions with the same short
+    /// name `new` live in different crates. A call qualified with
+    /// the right canonical crate path must resolve to that crate's
+    /// function — NOT the other crate's function-of-the-same-name,
+    /// even though `find_by_name("new")` returns both.
+    ///
+    /// This pins option (A) — qualified-name workspace matching
+    /// for scoped calls. Without it, short-name first-match would
+    /// pick whichever the store happened to return first, which is
+    /// nondeterministic and silently wrong half the time.
+    #[test]
+    #[serial]
+    fn test_resolve_disambiguates_via_qualified_name() {
+        let store = GraphStore::open_in_memory().expect("Failed to open store");
+        let mut builder = GraphBuilder::new(store);
+
+        let temp_dir = tempdir().expect("Failed to create temp dir");
+
+        // Stage two crates each with a `new` function.
+        let crate_a = temp_dir.path().join("crates/crate-alpha/src");
+        let crate_b = temp_dir.path().join("crates/crate-beta/src");
+        fs::create_dir_all(&crate_a).expect("mk crate-alpha");
+        fs::create_dir_all(&crate_b).expect("mk crate-beta");
+        fs::write(
+            crate_a.join("lib.rs"),
+            r#"
+pub fn new() -> i32 { 1 }
+"#,
+        )
+        .expect("write alpha lib.rs");
+        fs::write(
+            crate_b.join("lib.rs"),
+            r#"
+pub fn new() -> i32 { 2 }
+"#,
+        )
+        .expect("write beta lib.rs");
+
+        // Caller refers to crate_alpha's `new` via its canonical path.
+        let crate_c = temp_dir.path().join("crates/crate-caller/src");
+        fs::create_dir_all(&crate_c).expect("mk crate-caller");
+        fs::write(
+            crate_c.join("lib.rs"),
+            r#"
+pub fn use_alpha() -> i32 {
+    crate_alpha::new()
+}
+"#,
+        )
+        .expect("write caller lib.rs");
+
+        builder
+            .build_directory(temp_dir.path())
+            .expect("build should succeed");
+
+        // Sanity: both `new` functions exist in the store.
+        let news = builder
+            .store()
+            .find_by_name("new")
+            .expect("find_by_name new should succeed");
+        assert!(
+            news.len() >= 2,
+            "expected both crates' new() functions in the graph; got {} entries",
+            news.len()
+        );
+
+        // Find use_alpha's node id.
+        let callers = builder
+            .store()
+            .find_by_name("use_alpha")
+            .expect("find use_alpha");
+        assert!(!callers.is_empty(), "use_alpha must be indexed");
+        let use_alpha_id = extract_node_id(&callers[0]).expect("use_alpha id");
+
+        // Look at use_alpha's CALLS edges. Exactly one should
+        // target crate_alpha's new (not crate_beta's).
+        let callees = builder
+            .store()
+            .find_callees(&use_alpha_id)
+            .expect("find_callees");
+        assert!(
+            !callees.is_empty(),
+            "use_alpha should have at least one CALLS edge (its scoped call to crate_alpha::new)"
+        );
+        let resolved_qualified: Vec<String> = callees
+            .iter()
+            .filter_map(|v| extract_node_string_property(v, "qualified_name"))
+            .collect();
+        assert!(
+            resolved_qualified.iter().any(|q| q == "crate_alpha::new"),
+            "scoped call `crate_alpha::new()` should resolve to crate_alpha::new; got qualified_names {resolved_qualified:?}"
+        );
+        assert!(
+            !resolved_qualified.iter().any(|q| q == "crate_beta::new"),
+            "scoped call to crate_alpha::new() must NOT resolve to crate_beta::new; got {resolved_qualified:?}"
         );
     }
 }

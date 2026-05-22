@@ -287,6 +287,26 @@ impl GraphStore {
             .collect())
     }
 
+    /// Find symbols by fully-qualified name (exact match).
+    ///
+    /// Used by the call resolver to resolve scoped calls
+    /// (e.g. `muninn_rlm::daemon::socket_path_for_repo`) against
+    /// the canonical path of the defining symbol. Returns at most
+    /// one result per defined symbol — if you get multiple, you
+    /// have either a duplicate from an unreset stale graph or a
+    /// genuine name collision (rare with full paths).
+    pub fn find_by_qualified_name(&self, qualified_name: &str) -> Result<Vec<Value>> {
+        let cypher = format!(
+            "MATCH (n {{qualified_name: '{}'}}) RETURN n",
+            graphqlite::escape_string(qualified_name)
+        );
+        let result = self.graph.query(&cypher)?;
+        Ok(result
+            .iter()
+            .filter_map(|r| r.get_value("n").cloned())
+            .collect())
+    }
+
     /// Find symbols by name (exact match).
     pub fn find_by_name(&self, name: &str) -> Result<Vec<Value>> {
         // Use inline property matching for exact name match

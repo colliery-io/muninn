@@ -11,6 +11,7 @@ pub mod builder;
 pub mod doc_store;
 pub mod edges;
 pub mod lang;
+pub mod module_path;
 pub mod parser;
 pub mod registry;
 pub mod store;

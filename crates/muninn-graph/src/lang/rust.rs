@@ -225,6 +225,10 @@ impl RustExtractor {
         let mut cursor = tree_sitter::QueryCursor::new();
         let source_bytes = source.as_bytes();
 
+        // Compute the file-level module prefix once per file.
+        // Symbols inside the file get qualified_name = "<prefix>::<name>".
+        let module_prefix = crate::module_path::derive_rust_module_prefix(file_path);
+
         let mut symbols = Vec::new();
         let mut matches = cursor.matches(&queries.symbols, tree.root_node(), source_bytes);
 
@@ -313,6 +317,8 @@ impl RustExtractor {
                     Some(signature_parts.join(" "))
                 };
 
+                let qualified_name = module_prefix.as_ref().map(|p| format!("{p}::{name}"));
+
                 symbols.push(Symbol {
                     name,
                     kind,
@@ -320,7 +326,7 @@ impl RustExtractor {
                     start_line,
                     end_line,
                     signature,
-                    qualified_name: None,
+                    qualified_name,
                     doc_comment,
                     visibility: visibility.unwrap_or(Visibility::Private),
                 });

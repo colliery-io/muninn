@@ -189,6 +189,15 @@ enum Commands {
         /// Watch for changes and update incrementally
         #[arg(long)]
         watch: bool,
+
+        /// Wipe the graph database and rebuild from scratch.
+        /// Useful when symbols accumulated stale duplicates (e.g.
+        /// across schema changes or after the cross-file resolver
+        /// improved). Without this, `muninn index` is additive —
+        /// it upserts nodes and edges but doesn't remove anything
+        /// that no longer matches a current source file.
+        #[arg(long)]
+        reset: bool,
     },
 
     /// Initialize a new .muninn directory with config file
@@ -1022,6 +1031,7 @@ async fn main() -> Result<()> {
             path,
             output,
             watch,
+            reset,
         } => {
             // Index uses file logging
             let muninn_dir = config_dir
@@ -1040,6 +1050,27 @@ async fn main() -> Result<()> {
 
             let graph_path =
                 output.unwrap_or_else(|| config.resolve_graph_path(config_dir.as_deref()));
+
+            // If --reset, remove the existing DB file before opening
+            // so the new GraphStore is empty. Keeps semantics clean:
+            // we don't have a per-table truncate, and rebuild is fast
+            // enough that wipe-and-rebuild is the simplest correct path.
+            if reset && graph_path.exists() {
+                info!("Resetting graph at {}", graph_path.display());
+                std::fs::remove_file(&graph_path)?;
+                // Also remove any sqlite sidecar files (WAL, SHM).
+                for suffix in ["-wal", "-shm", "-journal"] {
+                    let sidecar = graph_path.with_extension(format!(
+                        "{}{}",
+                        graph_path
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or(""),
+                        suffix
+                    ));
+                    let _ = std::fs::remove_file(sidecar);
+                }
+            }
 
             info!(
                 "Indexing {} -> {}",
