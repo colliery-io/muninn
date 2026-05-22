@@ -127,6 +127,23 @@ pub struct Symbol {
 
     /// Visibility/accessibility of the symbol
     pub visibility: Visibility,
+
+    /// Cyclomatic complexity (branches + 1), as measured by the
+    /// vendored narsil CallGraph extractor. `None` when the source
+    /// language / extractor didn't produce it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub cyclomatic: Option<usize>,
+
+    /// Cognitive complexity (nesting-weighted variant of cyclomatic),
+    /// as computed by the vendored narsil extractor.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub cognitive: Option<usize>,
+
+    /// Number of inbound + outbound CALLS edges for this symbol,
+    /// from the same extraction pass. Useful for "hotspot" queries
+    /// (highly-connected functions are usually load-bearing).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub call_degree: Option<usize>,
 }
 
 impl Symbol {
@@ -148,6 +165,9 @@ impl Symbol {
             qualified_name: None,
             doc_comment: None,
             visibility: Visibility::default(),
+            cyclomatic: None,
+            cognitive: None,
+            call_degree: None,
         }
     }
 

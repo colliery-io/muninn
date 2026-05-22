@@ -40,5 +40,6 @@ clap = { version = "4", features = ["derive", "env"] }
 # Internal crates
 muninn-core = { path = "crates/muninn-core" }
 muninn-graph = { path = "crates/muninn-graph" }
+muninn-narsil-vendor = { path = "crates/muninn-narsil-vendor" }
 muninn-rlm = { path = "crates/muninn-rlm" }
 muninn-tracing = { path = "crates/muninn-tracing" }

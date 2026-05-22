@@ -142,7 +142,13 @@ impl GraphBuilder {
         for entry in cg.iter_nodes() {
             let qkey = entry.key().clone();
             let node: &CallNode = entry.value();
-            let sym = call_node_to_symbol(node);
+            // call_degree = inbound + outbound edges. This is the same
+            // signal narsil's `get_hotspots` uses to rank functions —
+            // surfacing it as a node property lets `find_symbols` /
+            // `graph_query` cheaply find the load-bearing code without
+            // a second pass.
+            let degree = node.calls.len() + node.called_by.len();
+            let sym = call_node_to_symbol(node, degree);
             qkey_to_id.insert(qkey, sym.id());
             symbols.push(sym);
         }
@@ -199,7 +205,10 @@ fn is_supported_source_file(path: &Path) -> bool {
 /// Adapt narsil's `CallNode` to our `Symbol`. Narsil stores the
 /// fully-qualified name (post-scope-hint resolution) as `name`; we
 /// keep that as `qualified_name` and derive a short display name.
-fn call_node_to_symbol(node: &CallNode) -> Symbol {
+/// `degree` is `len(node.calls) + len(node.called_by)` — passed in
+/// rather than computed here so the caller can iterate the call
+/// graph once.
+fn call_node_to_symbol(node: &CallNode, degree: usize) -> Symbol {
     let short = node
         .name
         .rsplit("::")
@@ -219,6 +228,9 @@ fn call_node_to_symbol(node: &CallNode) -> Symbol {
         qualified_name: Some(node.name.clone()),
         doc_comment: None,
         visibility: Visibility::Public,
+        cyclomatic: Some(node.metrics.cyclomatic),
+        cognitive: Some(node.metrics.cognitive),
+        call_degree: Some(degree),
     }
 }
 

@@ -914,6 +914,10 @@ async fn main() -> Result<()> {
                     ));
                     let _ = std::fs::remove_file(sidecar);
                 }
+                // Drop the Merkle snapshot too — otherwise the
+                // incremental gate would see "no changes" against an
+                // empty graph and skip the rebuild we just asked for.
+                let _ = std::fs::remove_file(muninn_dir.join("incremental-state.bin"));
             }
 
             info!(
@@ -930,6 +934,53 @@ async fn main() -> Result<()> {
             // GraphStore::open creates the database if it doesn't exist
             let store = GraphStore::open(&graph_path)?;
 
+            // Incremental gate: walk the tree, hash everything, compare
+            // against the previous Merkle snapshot. If nothing changed,
+            // skip extraction entirely — the graph is already up to date.
+            // On a fresh run (no prior snapshot) or `--reset` (snapshot
+            // deleted alongside graph.db) this falls through to the full
+            // build.
+            let state_path = muninn_dir.join("incremental-state.bin");
+            let no_op_parse = |_p: &std::path::Path| Ok(Vec::new());
+            let new_tree =
+                muninn_narsil_vendor::incremental::MerkleTree::build(&source_path, no_op_parse)?;
+
+            let skip = if reset {
+                false
+            } else if state_path.exists() {
+                match muninn_narsil_vendor::incremental::MerkleTree::load(&state_path) {
+                    Ok(old_tree) => {
+                        let cs = old_tree.diff(&new_tree);
+                        if cs.is_empty() {
+                            info!(
+                                "Graph already up to date for {} (no source changes since last index)",
+                                source_path.display()
+                            );
+                            true
+                        } else {
+                            info!(
+                                "Detected {} added / {} modified / {} deleted files since last index",
+                                cs.added.len(),
+                                cs.modified.len(),
+                                cs.deleted.len(),
+                            );
+                            false
+                        }
+                    }
+                    Err(e) => {
+                        info!("Could not load incremental state ({e}); doing full reindex");
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+
+            if skip {
+                // We're done — no need to spin the extractor.
+                return Ok(());
+            }
+
             // Drive the vendored narsil extractor over the source tree.
             // This is the only indexing path muninn supports.
             let mut builder = GraphBuilder::new(store)?;
@@ -938,6 +989,15 @@ async fn main() -> Result<()> {
                 "Indexed {} files, {} nodes, {} edges",
                 stats.files_processed, stats.nodes_added, stats.edges_added
             );
+
+            // Persist the new snapshot so the next `muninn index` can
+            // short-circuit if nothing changed.
+            if let Err(e) = new_tree.save(&state_path) {
+                tracing::warn!(
+                    "Failed to save incremental state to {}: {e}",
+                    state_path.display()
+                );
+            }
 
             if watch {
                 anyhow::bail!(

@@ -369,6 +369,16 @@ fn symbol_to_properties(symbol: &Symbol) -> Vec<(&'static str, String)> {
         props.push(("doc_comment", doc.clone()));
     }
 
+    if let Some(v) = symbol.cyclomatic {
+        props.push(("cyclomatic", v.to_string()));
+    }
+    if let Some(v) = symbol.cognitive {
+        props.push(("cognitive", v.to_string()));
+    }
+    if let Some(v) = symbol.call_degree {
+        props.push(("call_degree", v.to_string()));
+    }
+
     props
 }
 
@@ -418,6 +428,9 @@ mod tests {
             qualified_name: None,
             doc_comment: None,
             visibility: Visibility::Public,
+            cyclomatic: None,
+            cognitive: None,
+            call_degree: None,
         }
     }
 

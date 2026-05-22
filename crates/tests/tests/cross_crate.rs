@@ -228,6 +228,9 @@ async fn test_e2e_graph_tools_integration() {
         qualified_name: Some("crate::math::calculate_sum".to_string()),
         doc_comment: Some("Adds two numbers together".to_string()),
         visibility: Visibility::Public,
+        cyclomatic: None,
+        cognitive: None,
+        call_degree: None,
     };
     store.insert_node(&test_symbol).unwrap();
 

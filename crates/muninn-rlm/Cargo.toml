@@ -49,6 +49,7 @@ muninn-core = { workspace = true }
 
 # Graph
 muninn-graph = { path = "../muninn-graph" }
+muninn-narsil-vendor = { path = "../muninn-narsil-vendor" }
 
 # Tracing
 muninn-tracing = { path = "../muninn-tracing" }

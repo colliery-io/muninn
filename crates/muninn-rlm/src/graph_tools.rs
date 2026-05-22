@@ -353,6 +353,157 @@ impl Tool for GetSymbolTool {
 // FindSymbolsTool
 // ============================================================================
 
+// ============================================================================
+// ReadSymbolTool
+// ============================================================================
+
+/// Tool for fetching the source body of a symbol, with scope-aware
+/// extraction (returns the whole function/class block, not a raw N-line
+/// window). Implemented on top of the vendored narsil
+/// `extract::extract_excerpts` with `expand_to_scope = true`.
+pub struct ReadSymbolTool {
+    store: SharedGraphStore,
+}
+
+impl ReadSymbolTool {
+    pub fn new(store: SharedGraphStore) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait]
+impl Tool for ReadSymbolTool {
+    fn name(&self) -> &str {
+        "read_symbol"
+    }
+
+    fn description(&self) -> &str {
+        "Read the full source body of a symbol (function, method, etc.) \
+         by name or id. Returns the complete scope (entire function/class \
+         block), not just a fixed line window. Use this instead of \
+         read_file when you want one symbol — it skips the surrounding \
+         file content and pays only for the relevant lines."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name of the symbol to read"
+                },
+                "id": {
+                    "type": "string",
+                    "description": "Full ID of the symbol node (if known)"
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, params: serde_json::Value) -> Result<ToolResult> {
+        let symbol_id = params.get("id").and_then(|v| v.as_str());
+        let symbol_name = params.get("name").and_then(|v| v.as_str());
+
+        let store = lock_store(&self.store)?;
+
+        // Resolve to a node Value either by id or by name (first match).
+        let node = if let Some(id) = symbol_id {
+            store
+                .get_node(id)
+                .map_err(|e| RlmError::ToolExecution(format!("get_node: {e}")))?
+        } else if let Some(name) = symbol_name {
+            let symbols = store
+                .find_by_name(name)
+                .map_err(|e| RlmError::ToolExecution(format!("find_by_name: {e}")))?;
+            symbols.into_iter().next()
+        } else {
+            return Ok(ToolResult::error(
+                "Must provide either 'name' or 'id'",
+                true,
+            ));
+        };
+
+        let Some(node) = node else {
+            return Ok(ToolResult::text(format!(
+                "No symbol found for {}",
+                symbol_id.or(symbol_name).unwrap_or("(none)")
+            )));
+        };
+
+        // Pull file_path and start_line off the node's properties.
+        let file_path = node_str_property(&node, "file_path");
+        let start_line = node_int_property(&node, "start_line").unwrap_or(1) as usize;
+        let display_name = node_str_property(&node, "name").unwrap_or_default();
+
+        let Some(file_path) = file_path else {
+            return Ok(ToolResult::text(format!(
+                "Symbol '{display_name}' has no file_path — cannot read body"
+            )));
+        };
+
+        let source = std::fs::read_to_string(&file_path)
+            .map_err(|e| RlmError::ToolExecution(format!("read {file_path}: {e}")))?;
+
+        let cfg = muninn_narsil_vendor::extract::ExcerptConfig {
+            // Most function bodies fit comfortably under 200 lines.
+            // Scope expansion handles smaller chunks correctly.
+            max_lines: 200,
+            ..Default::default()
+        };
+        let excerpts =
+            muninn_narsil_vendor::extract::extract_excerpts(&source, &[start_line], &cfg);
+
+        let body = excerpts
+            .into_iter()
+            .next()
+            .map(|e| e.content)
+            .unwrap_or_else(|| "(extract_excerpts returned no excerpt)".to_string());
+
+        let output = serde_json::json!({
+            "name": display_name,
+            "file_path": file_path,
+            "start_line": start_line,
+            "body": body,
+        });
+        let mut result = ToolResult::json(output);
+        result.metadata = ToolMetadata::with_source(&file_path).with_tag("symbol-body");
+        Ok(result)
+    }
+}
+
+/// Pull a string property out of a graphqlite node `Value`. Returns
+/// `None` if the property isn't present or isn't a string.
+fn node_str_property(value: &Value, key: &str) -> Option<String> {
+    if let Value::Object(map) = value {
+        if let Some(Value::Object(props)) = map.get("properties") {
+            if let Some(Value::String(s)) = props.get(key) {
+                return Some(s.clone());
+            }
+        }
+    }
+    None
+}
+
+fn node_int_property(value: &Value, key: &str) -> Option<i64> {
+    if let Value::Object(map) = value {
+        if let Some(Value::Object(props)) = map.get("properties") {
+            match props.get(key) {
+                Some(Value::Integer(i)) => return Some(*i),
+                // start_line is stored as a string after symbol_to_properties
+                // converts via to_string(); parse it back.
+                Some(Value::String(s)) => return s.parse().ok(),
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+// ============================================================================
+// FindSymbolsTool
+// ============================================================================
+
 /// Tool for searching symbols with user-friendly parameters.
 ///
 /// This tool abstracts the underlying schema, so users don't need to know
@@ -820,6 +971,7 @@ pub fn create_graph_tools(store: SharedGraphStore) -> Vec<Box<dyn Tool>> {
         Box::new(FindCalleesTool::new(store.clone())),
         // Detail lookup
         Box::new(GetSymbolTool::new(store.clone())),
+        Box::new(ReadSymbolTool::new(store.clone())),
         // Raw query as fallback for advanced users
         Box::new(GraphQueryTool::new(store)),
     ]
@@ -842,6 +994,9 @@ mod tests {
             qualified_name: Some(format!("crate::{}", name)),
             doc_comment: None,
             visibility: Visibility::Public,
+            cyclomatic: None,
+            cognitive: None,
+            call_degree: None,
         }
     }
 
@@ -878,7 +1033,7 @@ mod tests {
     fn test_create_graph_tools() {
         let store = setup_test_store();
         let tools = create_graph_tools(store);
-        assert_eq!(tools.len(), 6);
+        assert_eq!(tools.len(), 7);
 
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(names.contains(&"find_symbols"));
@@ -886,6 +1041,7 @@ mod tests {
         assert!(names.contains(&"find_callers"));
         assert!(names.contains(&"find_callees"));
         assert!(names.contains(&"get_symbol"));
+        assert!(names.contains(&"read_symbol"));
         assert!(names.contains(&"graph_query"));
     }
 
