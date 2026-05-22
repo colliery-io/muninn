@@ -4,6 +4,7 @@ members = [
     "crates/muninn",
     "crates/muninn-core",
     "crates/muninn-graph",
+    "crates/muninn-narsil-vendor",
     "crates/muninn-rlm",
     "crates/muninn-tracing",
     "crates/tests",

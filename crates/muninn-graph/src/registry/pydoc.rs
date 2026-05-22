@@ -23,7 +23,11 @@
 use std::path::{Path, PathBuf};
 
 use crate::doc_store::{DocChunkInput, ItemType};
-use crate::parser::Parser;
+use muninn_narsil_vendor::parser::LanguageParser;
+// Re-export tree-sitter under its canonical name so existing
+// `tree_sitter::Node` paths in this module resolve without us
+// taking a direct tree-sitter dep.
+use muninn_narsil_vendor::tree_sitter;
 
 /// Error type for Python doc extraction.
 #[derive(Debug, thiserror::Error)]
@@ -76,7 +80,7 @@ impl ExtractedPyItem {
 /// This extractor uses tree-sitter to parse Python source files directly,
 /// requiring no external Python runtime or dependencies.
 pub struct PyDocExtractor {
-    parser: Parser,
+    parser: LanguageParser,
 }
 
 // Re-export old name for compatibility
@@ -86,7 +90,8 @@ impl PyDocExtractor {
     /// Create a new extractor.
     pub fn new() -> Self {
         Self {
-            parser: Parser::new(),
+            parser: LanguageParser::new()
+                .expect("narsil LanguageParser::new should not fail during init"),
         }
     }
 
@@ -152,13 +157,15 @@ impl PyDocExtractor {
         source: &str,
         module_path: &str,
     ) -> Result<Vec<ExtractedPyItem>> {
-        let parsed = self
+        // Narsil's parser takes a path to infer language; synthesize
+        // a `.py` path so it picks the Python grammar.
+        let synthetic_path = std::path::Path::new("__pydoc_source__.py");
+        let tree = self
             .parser
-            .parse_source(source, crate::parser::Language::Python)
-            .map_err(|e| PyDocError::Parse(e.to_string()))?;
+            .parse_to_tree(synthetic_path, source)
+            .map_err(|e| PyDocError::Parse(format!("{e:#}")))?;
 
         let mut items = Vec::new();
-        let tree = &parsed.tree;
         let root = tree.root_node();
 
         // Extract module docstring

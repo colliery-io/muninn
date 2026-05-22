@@ -46,7 +46,7 @@ use muninn_graph::registry::{
     IndexerConfig, LlmsTxtIndexer, LlmsTxtIndexerConfig, PyDocIndexer, PyIndexerConfig,
     RustDocIndexer,
 };
-use muninn_graph::{FileEvent, FileWatcher, GraphBuilder, GraphStore};
+use muninn_graph::{GraphBuilder, GraphStore};
 use muninn_rlm::{
     AnthropicBackend, AnthropicConfig, BudgetConfig as RlmBudgetConfig, FileTokenManager,
     GroqBackend, GroqConfig, OAuthConfig, OllamaBackend, OllamaConfig, PkceChallenge, ProxyConfig,
@@ -198,15 +198,6 @@ enum Commands {
         /// that no longer matches a current source file.
         #[arg(long)]
         reset: bool,
-
-        /// Ingest a pre-built SCIP index (.scip protobuf) instead
-        /// of running muninn's tree-sitter extractors. Produces a
-        /// compiler-grade graph from a real indexer's output —
-        /// e.g. `rust-analyzer scip .` or `scip-python index .`.
-        /// Bypasses tree-sitter parsing entirely. Combine with
-        /// `--reset` for a clean slate.
-        #[arg(long, value_name = "SCIP_FILE")]
-        from_scip: Option<PathBuf>,
     },
 
     /// Initialize a new .muninn directory with config file
@@ -640,162 +631,6 @@ fn open_doc_store(path: &PathBuf) -> Result<Option<SharedDocStore>> {
     }
 }
 
-/// Start background indexing if graph store doesn't exist.
-fn start_background_indexing(graph_path: PathBuf, source_path: PathBuf, extensions: Vec<String>) {
-    if graph_path.exists() {
-        return;
-    }
-
-    info!(
-        "Starting background indexing of {} -> {}",
-        source_path.display(),
-        graph_path.display()
-    );
-
-    std::thread::spawn(move || {
-        // Create parent directory if needed
-        if let Some(parent) = graph_path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                tracing::error!("Failed to create graph directory: {}", e);
-                return;
-            }
-        }
-
-        // Open/create the graph store
-        let store = match GraphStore::open(&graph_path) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!("Failed to create graph store: {}", e);
-                return;
-            }
-        };
-
-        // Build the index
-        let mut builder = GraphBuilder::new(store);
-
-        tracing::debug!("Indexing extensions: {:?}", extensions);
-
-        match builder.build_directory(&source_path) {
-            Ok(stats) => {
-                info!(
-                    "Background indexing complete: {} files, {} nodes, {} edges",
-                    stats.files_processed, stats.nodes_added, stats.edges_added
-                );
-            }
-            Err(e) => {
-                tracing::error!("Background indexing failed: {}", e);
-            }
-        }
-    });
-}
-
-/// Start file watcher to keep graph in sync with source changes.
-///
-/// Collects file changes over a debounce window and batch processes them.
-fn start_file_watcher(graph_path: PathBuf, source_path: PathBuf, debounce_ms: u64) {
-    use std::collections::HashSet;
-    use std::time::{Duration, Instant};
-
-    std::thread::spawn(move || {
-        // Wait for graph to exist before starting watcher
-        while !graph_path.exists() {
-            std::thread::sleep(Duration::from_secs(1));
-        }
-
-        let watcher = match FileWatcher::new(&source_path) {
-            Ok(w) => w,
-            Err(e) => {
-                tracing::error!("Failed to create file watcher: {}", e);
-                return;
-            }
-        };
-
-        info!("File watcher started for {}", source_path.display());
-
-        let debounce_duration = Duration::from_millis(debounce_ms);
-        let mut pending_modified: HashSet<PathBuf> = HashSet::new();
-        let mut pending_deleted: HashSet<PathBuf> = HashSet::new();
-        let mut last_event_time = Instant::now();
-
-        loop {
-            // Try to get next event with timeout
-            match watcher.try_next_event() {
-                Some(event) => {
-                    last_event_time = Instant::now();
-                    match event {
-                        FileEvent::Modified(path) | FileEvent::Created(path) => {
-                            pending_deleted.remove(&path);
-                            pending_modified.insert(path);
-                        }
-                        FileEvent::Deleted(path) => {
-                            pending_modified.remove(&path);
-                            pending_deleted.insert(path);
-                        }
-                    }
-                }
-                None => {
-                    // No event available - check if we should flush pending changes
-                    if (!pending_modified.is_empty() || !pending_deleted.is_empty())
-                        && last_event_time.elapsed() >= debounce_duration
-                    {
-                        // Flush pending changes
-                        let modified: Vec<_> = pending_modified.drain().collect();
-                        let deleted: Vec<_> = pending_deleted.drain().collect();
-
-                        if let Err(e) = process_file_changes(&graph_path, &modified, &deleted) {
-                            tracing::error!("Failed to process file changes: {}", e);
-                        }
-                    }
-                    // Sleep briefly to avoid busy loop
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-            }
-        }
-    });
-}
-
-/// Process batched file changes by updating the graph.
-fn process_file_changes(
-    graph_path: &PathBuf,
-    modified: &[PathBuf],
-    deleted: &[PathBuf],
-) -> Result<()> {
-    if modified.is_empty() && deleted.is_empty() {
-        return Ok(());
-    }
-
-    let store = GraphStore::open(graph_path)?;
-    let mut builder = GraphBuilder::new(store);
-
-    // Process deletions first
-    for path in deleted {
-        let path_str = path.to_string_lossy();
-        tracing::debug!("Removing from graph: {}", path_str);
-        if let Err(e) = builder.store().delete_file(&path_str) {
-            tracing::warn!("Failed to delete {}: {}", path_str, e);
-        }
-    }
-
-    // Process modifications (rebuild_file handles delete + rebuild)
-    let mut stats = muninn_graph::BuildStats::default();
-    for path in modified {
-        tracing::debug!("Rebuilding in graph: {}", path.display());
-        match builder.rebuild_file(path) {
-            Ok(file_stats) => stats.merge(&file_stats),
-            Err(e) => tracing::warn!("Failed to rebuild {}: {}", path.display(), e),
-        }
-    }
-
-    if stats.files_processed > 0 {
-        info!(
-            "Graph updated: {} files, {} nodes, {} edges",
-            stats.files_processed, stats.nodes_added, stats.edges_added
-        );
-    }
-
-    Ok(())
-}
-
 /// Load config from file or auto-discover from `.muninn/config.toml`.
 ///
 /// Returns the config and the path to the `.muninn` directory (for resolving relative paths).
@@ -1041,7 +876,6 @@ async fn main() -> Result<()> {
             output,
             watch,
             reset,
-            from_scip,
         } => {
             // Index uses file logging
             let muninn_dir = config_dir
@@ -1096,38 +930,20 @@ async fn main() -> Result<()> {
             // GraphStore::open creates the database if it doesn't exist
             let store = GraphStore::open(&graph_path)?;
 
-            // SCIP ingest path: skip tree-sitter entirely, load
-            // symbols + occurrences from a pre-built SCIP index.
-            if let Some(scip_file) = from_scip {
-                info!("Ingesting SCIP index from {}", scip_file.display());
-                let stats =
-                    muninn_graph::scip_ingest::ingest_scip(&scip_file, &source_path, &store)?;
-                info!(
-                    "SCIP ingest complete: {} documents, {} symbol nodes, {} call edges",
-                    stats.documents, stats.symbol_nodes, stats.call_edges
-                );
-                return Ok(());
-            }
-
-            // Build the index
-            let mut builder = GraphBuilder::new(store);
-
-            info!("Indexing extensions: {:?}", config.graph.extensions);
-
-            // Index the directory (GraphBuilder auto-detects languages from extensions)
+            // Drive the vendored narsil extractor over the source tree.
+            // This is the only indexing path muninn supports.
+            let mut builder = GraphBuilder::new(store)?;
             let stats = builder.build_directory(&source_path)?;
             info!(
-                "Indexed {} files, {} nodes, {} edges (parse: {}ms, store: {}ms)",
-                stats.files_processed,
-                stats.nodes_added,
-                stats.edges_added,
-                stats.parse_time_ms,
-                stats.store_time_ms
+                "Indexed {} files, {} nodes, {} edges",
+                stats.files_processed, stats.nodes_added, stats.edges_added
             );
 
             if watch {
-                info!("Watch mode not yet implemented");
-                // TODO: Implement file watching with notify crate
+                anyhow::bail!(
+                    "--watch is not supported — re-run `muninn index` after \
+                     structural changes you want reflected in the graph."
+                );
             }
         }
 
@@ -2273,20 +2089,14 @@ async fn run_daemon_command(
                 engine_graph_store,
             );
 
-            // Keep the graph in sync with the source tree while the
-            // daemon is alive. Without this, the graph stays at
-            // whatever state `muninn index` last produced (or the
-            // empty state from `muninn init`), and the RLM's
-            // graph-aware tools — find_callers, find_symbols — drift
-            // out of date the moment a file changes. 1s debounce
-            // batches rapid saves; the watcher uses .gitignore +
-            // the configured extensions to skip noise.
-            if graph_path.exists() {
-                start_file_watcher(graph_path.clone(), work_path.clone(), 1000);
-            } else {
+            // The daemon does NOT auto-reindex. Narsil's extraction
+            // is fast enough to re-run on demand (a few seconds even
+            // for medium repos), and the watch-and-rebuild pattern
+            // introduced its own correctness gaps. Users re-run
+            // `muninn index` when they want fresh graph state.
+            if !graph_path.exists() {
                 tracing::info!(
-                    "graph DB missing at {}; skipping file watcher. Run `muninn index` to bootstrap, \
-                     then restart the daemon to pick up watching.",
+                    "graph DB missing at {}; daemon will run with an empty graph. Run `muninn index` to populate.",
                     graph_path.display()
                 );
             }
@@ -2429,18 +2239,11 @@ async fn run_with_agent(launch: AgentLaunchConfig) -> Result<()> {
     let doc_path = muninn_dir.join("docs.db");
     let doc_store = open_doc_store(&doc_path)?;
 
-    // Start background indexing if graph doesn't exist
-    if graph_store.is_none() {
-        start_background_indexing(
-            graph_path.clone(),
-            work_path.clone(),
-            launch.config.graph.extensions.clone(),
-        );
-    }
-
-    // Start file watcher to keep graph in sync with source changes
-    // Uses 1 second debounce to batch rapid changes
-    start_file_watcher(graph_path, work_path.clone(), 1000);
+    // Note: this legacy agent-launch path does NOT auto-bootstrap
+    // the graph. Run `muninn index` once before launching if you
+    // want a populated graph. The watcher / background-build paths
+    // were removed when we adopted narsil's extractor.
+    let _ = (&graph_store, &graph_path, &launch.config.graph.extensions);
 
     // Create separate backends for router and RLM
     // If CLI provides groq_key, use it for both; otherwise use config

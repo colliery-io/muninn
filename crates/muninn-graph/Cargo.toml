@@ -8,32 +8,19 @@ rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
+anyhow = "1"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
-# Tree-sitter parsing
-tree-sitter = "0.25"
-tree-sitter-rust = "0.24"
-tree-sitter-python = "0.23"
-tree-sitter-c = "0.23"
-tree-sitter-cpp = "0.23"
-streaming-iterator = "0.1"
+# Code-graph extraction — vendored from narsil-mcp.
+# Replaces our previous hand-written tree-sitter extractors and the
+# scip ingest. See crates/muninn-narsil-vendor/NOTICE.md for provenance.
+muninn-narsil-vendor = { path = "../muninn-narsil-vendor" }
 
 # Graph storage
 graphqlite = { version = "0.3", features = ["bundled-extension"] }
 rusqlite = "0.31"  # Same version as graphqlite uses
-
-# SCIP (Source Code Intelligence Protocol) — optional ingestion path
-# that replaces our hand-written tree-sitter extractors with the
-# output of a real compiler-grade indexer (e.g. `rust-analyzer scip`).
-# Used by the `--from-scip` ingest path; the default index pipeline
-# still uses tree-sitter.
-scip = "0.5"
-# protobuf is a transitive dep of scip; we name it directly so we
-# can use the `Message::parse_from_bytes` trait method without going
-# through scip's internal re-exports.
-protobuf = "3"
 
 # File watching
 notify = "6"

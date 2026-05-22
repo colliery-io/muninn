@@ -1,20 +1,17 @@
 //! muninn-graph: Code graph infrastructure
 //!
-//! This crate provides the core code graph functionality for Muninn:
-//! - Symbol extraction from source code via tree-sitter
-//! - Graph storage and querying
-//! - Graph building from source files
-//! - File watching for incremental updates
-//! - Registry clients for fetching package metadata and source
+//! Symbol/edge schema, on-disk graph store (graphqlite), the build
+//! pipeline that drives the vendored narsil call-graph extractor,
+//! and the file watcher.
+//!
+//! Extraction itself lives in [`muninn_narsil_vendor`]. This crate
+//! owns the adapter that converts narsil's `CallNode`/`CallEdge` into
+//! our `Symbol`/`Edge` types and persists them through `GraphStore`.
 
 pub mod builder;
 pub mod doc_store;
 pub mod edges;
-pub mod lang;
-pub mod module_path;
-pub mod parser;
 pub mod registry;
-pub mod scip_ingest;
 pub mod store;
 pub mod symbols;
 pub mod watcher;
@@ -25,9 +22,6 @@ pub use doc_store::{
     SearchMode,
 };
 pub use edges::{CallType, Edge, EdgeKind};
-pub use lang::python::PythonExtractor;
-pub use lang::rust::{Call, FFIMarker, Import, RustExtractor};
-pub use parser::{Language, ParseError, ParsedFile, Parser};
 pub use store::{GraphStats, GraphStore, StoreError};
 pub use symbols::{Symbol, SymbolKind, Visibility};
 pub use watcher::{FileEvent, FileWatcher, WatchError, WatcherConfig};
