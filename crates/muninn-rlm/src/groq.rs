@@ -288,6 +288,33 @@ impl GroqBackend {
             None
         };
 
+        // Map our `ToolChoice` onto Groq's OpenAI-shaped field. Without
+        // this we'd send `tools` but no `tool_choice`, defaulting to
+        // `auto` — which lets the model skip the tool call. The router
+        // path specifically needs `tool_choice: Tool { name }` to be
+        // forwarded as the function-pin object so the model is forced
+        // to comply.
+        let tool_choice = if tools.is_some() {
+            match &request.tool_choice {
+                Some(muninn_core::llm::ToolChoice::Auto) => {
+                    Some(serde_json::Value::String("auto".into()))
+                }
+                Some(muninn_core::llm::ToolChoice::Any) => {
+                    Some(serde_json::Value::String("required".into()))
+                }
+                Some(muninn_core::llm::ToolChoice::None) => {
+                    Some(serde_json::Value::String("none".into()))
+                }
+                Some(muninn_core::llm::ToolChoice::Tool { name }) => Some(serde_json::json!({
+                    "type": "function",
+                    "function": { "name": name },
+                })),
+                None => None,
+            }
+        } else {
+            None
+        };
+
         GroqChatRequest {
             model: effective_model,
             messages,
@@ -296,6 +323,7 @@ impl GroqBackend {
             top_p: request.top_p,
             stream: Some(request.stream),
             tools,
+            tool_choice,
             stop,
             reasoning_effort,
         }
@@ -320,11 +348,15 @@ impl GroqBackend {
         let body = response.text().await.unwrap_or_default();
 
         if let Ok(error) = serde_json::from_str::<GroqErrorResponse>(&body) {
+            let mut msg = error.error.message;
+            if let Some(fg) = error.error.failed_generation.as_ref().filter(|s| !s.is_empty()) {
+                msg = format!("{msg} | failed_generation: {fg}");
+            }
             match status.as_u16() {
-                401 => RlmError::Config(format!("Authentication failed: {}", error.error.message)),
-                429 => RlmError::Backend(format!("Rate limit exceeded: {}", error.error.message)),
-                500..=599 => RlmError::Backend(format!("Server error: {}", error.error.message)),
-                _ => RlmError::Backend(error.error.message),
+                401 => RlmError::Config(format!("Authentication failed: {}", msg)),
+                429 => RlmError::Backend(format!("Rate limit exceeded: {}", msg)),
+                500..=599 => RlmError::Backend(format!("Server error: {}", msg)),
+                _ => RlmError::Backend(msg),
             }
         } else {
             RlmError::Backend(format!("HTTP {}: {}", status, body))
@@ -383,15 +415,30 @@ impl LLMBackend for GroqBackend {
 
         let groq_request = self.to_groq_request(&request);
 
-        let response = self
-            .add_headers(self.client.post(self.completions_url()))
-            .json(&groq_request)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            return Err(Self::handle_error_response(response).await);
-        }
+        // Wrap the initial request (the bit that can fail with the
+        // strict-tool-call validation 5xx) in `with_retry` so the
+        // same nondeterminism-recovery logic that protects `complete`
+        // also covers the streaming path. We only retry the SEND —
+        // once the stream is open and bytes are flowing, errors mid-
+        // stream are surfaced to the caller; retrying them would
+        // re-emit partial events.
+        let response = with_retry(
+            self.config.max_retries,
+            self.config.retry_backoff,
+            "groq",
+            || async {
+                let resp = self
+                    .add_headers(self.client.post(self.completions_url()))
+                    .json(&groq_request)
+                    .send()
+                    .await?;
+                if !resp.status().is_success() {
+                    return Err(Self::handle_error_response(resp).await);
+                }
+                Ok(resp)
+            },
+        )
+        .await?;
 
         Ok(parse_groq_sse_stream(response.bytes_stream()))
     }
@@ -436,6 +483,12 @@ struct GroqChatRequest {
     stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<GroqTool>>,
+    /// OpenAI-style `tool_choice`. `"auto"`/`"required"`/`"none"` are
+    /// the string variants; pinning a specific tool uses the object
+    /// `{"type": "function", "function": {"name": "..."}}`. We model
+    /// it with `serde_json::Value` so both shapes round-trip cleanly.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stop: Option<Vec<String>>,
     /// Controls Qwen3 reasoning/thinking mode. Set to "none" to disable thinking.
@@ -578,6 +631,12 @@ struct GroqErrorResponse {
 #[derive(Debug, serde::Deserialize)]
 struct GroqError {
     message: String,
+    /// When Groq rejects a function call (its strict validation kicks
+    /// in on the model's tool-call output), the raw model output is
+    /// surfaced here. Logging it gives us actual diagnostic info
+    /// rather than the generic "Please adjust your prompt".
+    #[serde(default)]
+    failed_generation: Option<String>,
 }
 
 // ============================================================================

@@ -46,25 +46,29 @@ testing failure modes.
 
 Two pieces:
 
-1. **MCP side** — `muninn install-cc` (in the repo root) writes the
-   muninn entry into `.mcp.json` so CC sees the `search_code` /
-   `query_graph` tools.
-2. **Hook side** — restart Claude Code with `--plugin-dir` pointing
-   at this directory:
+1. **MCP side** — `muninn install-cc` (in your project's repo root)
+   writes the muninn entry into `.mcp.json` so CC sees the
+   `search_code` / `query_graph` tools.
+2. **Hook side** — from inside Claude Code:
 
-   ```bash
-   claude --plugin-dir /absolute/path/to/muninn/plugins/muninn-cc
+   ```
+   /plugin marketplace add colliery-io/muninn
+   /plugin install muninn-cc
    ```
 
-   Use an absolute path. There is currently no slash command to add
-   a local plugin to an already-running CC session; you must restart
-   with the flag. After load, edits to `hooks.json` /
-   `user-prompt-submit.sh` can be picked up live with `/reload-plugins`.
+   This pulls the plugin from the muninn repo's
+   `.claude-plugin/marketplace.json`. Update later with
+   `/plugin marketplace update muninn`.
 
-If you want to share this plugin with teammates, repackage it as a
-plugin marketplace and use `/plugin marketplace add` + `/plugin
-install`. The local-directory flow above is for development and
-single-user installs.
+**Developing against a local checkout?** Use `--plugin-dir` at session
+start instead of the marketplace flow:
+
+```bash
+claude --plugin-dir /absolute/path/to/muninn/plugins/muninn-cc
+```
+
+Use an absolute path. After load, edits to `hooks.json` /
+`user-prompt-submit.sh` can be picked up live with `/reload-plugins`.
 
 ## Layout
 

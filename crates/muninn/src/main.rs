@@ -1107,8 +1107,9 @@ max_duration_secs = 300
                  shell. The default config targets Ollama Cloud."
             );
             println!(
-                "  2. For Claude Code: `muninn install-cc`, then restart CC with \
-                 `claude --plugin-dir /absolute/path/to/this-repo/plugins/muninn-cc`."
+                "  2. For Claude Code: `muninn install-cc` here, then inside CC \
+                 run `/plugin marketplace add colliery-io/muninn` and \
+                 `/plugin install muninn-cc`."
             );
             println!(
                 "  3. (Optional) `muninn index` to populate the code graph so \

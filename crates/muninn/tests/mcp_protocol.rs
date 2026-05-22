@@ -17,6 +17,8 @@
 //!   the model (the engine constructs a backend eagerly);
 //! - subprocess work belongs in the UAT pipeline.
 
+mod common;
+
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -63,11 +65,12 @@ fn wait_until<F: Fn() -> bool>(label: &str, timeout: Duration, cond: F) {
 }
 
 fn skip_if_no_backend(test: &str) -> bool {
-    let has_any = std::env::var_os("OLLAMA_API_KEY").is_some()
-        || std::env::var_os("GROQ_API_KEY").is_some()
-        || std::env::var_os("ANTHROPIC_API_KEY").is_some();
-    if !has_any {
-        eprintln!("[uat::{test}] skipping: no backend credentials — run via `angreal test uat`");
+    if !common::uat_credentials_present() {
+        let p = common::uat_provider();
+        eprintln!(
+            "[uat::{test}] skipping: {} not set for MUNINN_UAT_PROVIDER={p} — run via `angreal test uat`",
+            common::provider_env_var(&p)
+        );
         true
     } else {
         false

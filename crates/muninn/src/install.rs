@@ -323,11 +323,14 @@ pub fn describe_uninstall(outcome: &UninstallOutcome, scope: InstallScope) -> St
 /// There is no in-session slash command that adds a local plugin source.
 pub fn plugin_install_notice() -> String {
     "Plugin (muninn-cc) install:\n  \
-     The UserPromptSubmit hook plugin at plugins/muninn-cc/ is loaded by Claude Code \
-     at session start. Restart CC with:\n  \
-       claude --plugin-dir <absolute-path>/plugins/muninn-cc\n  \
-     (Use an absolute path. `/reload-plugins` inside the session picks up plugin \
-     edits without restarting. See plugins/muninn-cc/README.md for details.)"
+     From inside Claude Code, add the muninn marketplace once and install \
+     the plugin:\n  \
+       /plugin marketplace add colliery-io/muninn\n  \
+       /plugin install muninn-cc\n  \
+     Pull updates later with `/plugin marketplace update muninn`. \
+     For local development against this checkout, use \
+     `claude --plugin-dir <abs>/plugins/muninn-cc` instead. \
+     See plugins/muninn-cc/README.md for details."
         .to_string()
 }
 

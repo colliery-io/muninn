@@ -16,6 +16,8 @@
 //! — sanity check that the hook degrades cleanly when the daemon
 //! socket the hook resolves doesn't match a live daemon.
 
+mod common;
+
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -39,12 +41,11 @@ fn isolated_socket() -> PathBuf {
 }
 
 fn skip_if_no_backend(test: &str) -> bool {
-    let has_any = std::env::var_os("OLLAMA_API_KEY").is_some()
-        || std::env::var_os("GROQ_API_KEY").is_some()
-        || std::env::var_os("ANTHROPIC_API_KEY").is_some();
-    if !has_any {
+    if !common::uat_credentials_present() {
+        let p = common::uat_provider();
         eprintln!(
-            "[uat::{test}] skipping: no backend credentials in env — run via `angreal test uat`"
+            "[uat::{test}] skipping: {} not set for MUNINN_UAT_PROVIDER={p} — run via `angreal test uat`",
+            common::provider_env_var(&p)
         );
         true
     } else {
@@ -158,19 +159,14 @@ fn staged_config_dir(toml_body: &str) -> PathBuf {
     muninn_dir
 }
 
-/// Default test config: both router and rlm on Ollama Cloud +
-/// `gemma4:31b` — the same stack the routing UAT exercises, so we
-/// only need `OLLAMA_API_KEY`.
+/// Default test config: both router and rlm on whatever provider
+/// `MUNINN_UAT_PROVIDER` selects (default: ollama). Same stack the
+/// routing UAT exercises.
 fn isolated_config_dir() -> PathBuf {
-    staged_config_dir(
+    let cfg = format!(
         r#"
-[default]
-provider = "ollama"
-model = "gemma4:31b"
-
-[router]
-strategy = "llm"
-enabled = true
+{default_block}
+{router_block}enabled = true
 
 [rlm]
 
@@ -180,7 +176,10 @@ max_depth = 5
 max_tool_calls = 20
 max_duration_secs = 120
 "#,
-    )
+        default_block = common::uat_default_config_fragment(),
+        router_block = common::uat_router_config_fragment(),
+    );
+    staged_config_dir(&cfg)
 }
 
 /// Spawn `muninn hook submit` with `stdin_payload` on stdin. If
@@ -358,12 +357,19 @@ fn submit_injects_answer_envelope_for_code_question() {
         ctx.contains("one-shot") && ctx.contains("@muninn explore"),
         "additionalContext missing one-shot priming + re-trigger guidance: {ctx:?}"
     );
-    // The answer body should at least mention the actual symbol the
-    // prompt asked about — proves the RLM produced something
-    // substantive rather than a stub.
+    // The answer body should at least mention one of the symbols
+    // involved in the daemon socket path — proves the RLM produced
+    // something substantive rather than a stub. We accept either
+    // `socket_path_for_repo` (the canonical core helper) or
+    // `resolve_daemon_socket` (the main.rs wrapper that calls it)
+    // because different models genuinely pick different correct
+    // entry points when asked "where is the repo-scoped socket
+    // path computed?"
+    let mentions_socket_symbol = ctx.contains("socket_path_for_repo")
+        || ctx.contains("resolve_daemon_socket");
     assert!(
-        ctx.contains("socket_path_for_repo"),
-        "answer body missing the symbol the prompt asked about: {ctx:?}"
+        mentions_socket_symbol,
+        "answer body missing any socket-path symbol the prompt asked about: {ctx:?}"
     );
     eprintln!("[uat] submit injected envelope ({} bytes)", ctx.len());
 }

@@ -24,6 +24,8 @@
 //! Both tests use the muninn repo itself as the project root, so the
 //! engine can grep against real source files.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -54,12 +56,11 @@ fn pick_port() -> u16 {
 }
 
 fn skip_if_no_backend(test: &str) -> bool {
-    let has_any = std::env::var_os("OLLAMA_API_KEY").is_some()
-        || std::env::var_os("GROQ_API_KEY").is_some()
-        || std::env::var_os("ANTHROPIC_API_KEY").is_some();
-    if !has_any {
+    if !common::uat_credentials_present() {
+        let p = common::uat_provider();
         eprintln!(
-            "[uat::{test}] skipping: no backend credentials in env — run via `angreal test uat`"
+            "[uat::{test}] skipping: {} not set for MUNINN_UAT_PROVIDER={p} — run via `angreal test uat`",
+            common::provider_env_var(&p)
         );
         true
     } else {
@@ -74,19 +75,18 @@ fn stage_proxy_config() -> PathBuf {
     let tmp = tempfile::tempdir().expect("tempdir");
     let muninn_dir = tmp.path().join(".muninn");
     std::fs::create_dir_all(&muninn_dir).expect("mkdir .muninn");
+    // Provider/model are picked by the common helper from
+    // MUNINN_UAT_PROVIDER / MUNINN_UAT_MODEL (defaulting to ollama).
     let cfg = format!(
         r#"
 [project]
 root = {root:?}
 
-[default]
-provider = "ollama"
-model = "gemma4:31b"
-
-[router]
-strategy = "llm"
-"#,
-        root = workspace_root()
+{default_block}
+{router_block}"#,
+        root = workspace_root(),
+        default_block = common::uat_default_config_fragment(),
+        router_block = common::uat_router_config_fragment(),
     );
     std::fs::write(muninn_dir.join("config.toml"), cfg).expect("write config.toml");
     let path = muninn_dir;
@@ -207,7 +207,7 @@ fn proxy_rlm_explore_finds_known_symbol() {
     let proxy = ProxyHandle::start(&cfg, port);
 
     let body = serde_json::json!({
-        "model": "gemma4:31b",
+        "model": common::uat_model(),
         "max_tokens": 1024,
         "messages": [{
             "role": "user",
@@ -274,7 +274,7 @@ fn proxy_records_exploration_metadata() {
     let proxy = ProxyHandle::start(&cfg, port);
 
     let body = serde_json::json!({
-        "model": "gemma4:31b",
+        "model": common::uat_model(),
         "max_tokens": 512,
         "messages": [{
             "role": "user",
@@ -334,7 +334,7 @@ fn proxy_router_chooses_rlm_for_implicit_implementation_request() {
     let proxy = ProxyHandle::start(&cfg, port);
 
     let body = serde_json::json!({
-        "model": "gemma4:31b",
+        "model": common::uat_model(),
         "max_tokens": 1024,
         "messages": [{
             "role": "user",
@@ -373,7 +373,7 @@ fn proxy_router_chooses_rlm_for_implicit_diagnostic_request() {
     let proxy = ProxyHandle::start(&cfg, port);
 
     let body = serde_json::json!({
-        "model": "gemma4:31b",
+        "model": common::uat_model(),
         "max_tokens": 1024,
         "messages": [{
             "role": "user",

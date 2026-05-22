@@ -65,10 +65,38 @@ where
 
 /// Check if an error is retryable.
 ///
-/// Only network errors are considered retryable. Config, serialization,
-/// and other errors should not be retried.
+/// Retries cover:
+///   * `Network` errors — transient connect/read failures.
+///   * `Backend` errors whose message matches known transient
+///     patterns. Specifically, providers with strict server-side
+///     tool-call validation (Groq, in particular) sometimes reject
+///     a model's output with "Failed to call a function" when the
+///     model emits its native tool-call format (qwen's
+///     `<tool_call>…</tool_call>`, llama's `<function=…>…</function>`,
+///     gpt-oss's `<|channel|>…` harmony tokens) instead of the
+///     OpenAI-shaped structured response. The same prompt usually
+///     succeeds on a fresh sample because model output is
+///     nondeterministic at temperature > 0 and even at 0 there's
+///     enough sampling jitter to recover. A bounded retry turns
+///     "intermittent UAT failures on Groq" into "Groq just works."
+///   * Generic 5xx server messages we've seen surfaced through
+///     `handle_error_response` as `Backend("Server error: …")`.
+///
+/// Config, serialization, auth, etc. are NOT retried.
 pub fn is_retryable(error: &RlmError) -> bool {
-    matches!(error, RlmError::Network(_))
+    match error {
+        RlmError::Network(_) => true,
+        RlmError::Backend(msg) => {
+            // Tool-call-format failures from Groq's strict validator.
+            // Detection is by message content because the backend
+            // error type collapses many distinct upstream codes here.
+            msg.contains("Failed to call a function")
+                || msg.contains("Failed to parse tool call arguments")
+                // Generic 5xx as surfaced by handle_error_response.
+                || msg.starts_with("Server error:")
+        }
+        _ => false,
+    }
 }
 
 /// Resolve the wire-level model name for a request. Prefer the

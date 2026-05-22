@@ -1,0 +1,18 @@
+{
+  "name": "muninn",
+  "owner": {
+    "name": "Colliery",
+    "url": "https://github.com/colliery-io"
+  },
+  "description": "Muninn's Claude Code plugin — a UserPromptSubmit hook that pre-answers each user prompt via a cheap local model and injects the result.",
+  "plugins": [
+    {
+      "name": "muninn-cc",
+      "description": "Pre-answer each user prompt with muninn's recursive exploration on a cheap local model. Silent passthrough on any failure.",
+      "source": {
+        "type": "directory",
+        "path": "./plugins/muninn-cc"
+      }
+    }
+  ]
+}

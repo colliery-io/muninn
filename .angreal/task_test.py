@@ -167,9 +167,17 @@ def _repo_root() -> pathlib.Path:
 
         ## Examples
         ```
-        angreal test uat                  # all UAT tests
-        angreal test uat -n routing       # filter by name substring
+        angreal test uat                          # default provider (ollama)
+        angreal test uat -n routing               # filter by name substring
+        angreal test uat --provider groq          # run against Groq
+        angreal test uat --provider all           # run for each provider with a key present
         ```
+
+        Provider selection sets `MUNINN_UAT_PROVIDER` (read by the
+        test helpers in `crates/muninn/tests/common/mod.rs`). Pass
+        `--provider all` to iterate every provider whose API key
+        is present in the decrypted secrets bundle — handy for
+        cross-backend smoke tests in CI / release prep.
 
         Requires `sops` + `age` installed and `SOPS_AGE_KEY_FILE` set
         if you want to use the encrypted bundle. See
@@ -185,8 +193,19 @@ def _repo_root() -> pathlib.Path:
     required=False,
     help="Filter ignored tests by name substring (cargo's standard test filter)",
 )
-def test_uat(name=None):
+@angreal.argument(
+    name="provider",
+    long="provider",
+    required=False,
+    help="LLM provider to target: ollama|groq|anthropic|all (default: ollama)",
+)
+def test_uat(name=None, provider=None):
     """Run UAT tests against a real LLM."""
+    # angreal passes None when --provider is omitted; honor the
+    # documented default here, not at the def-site signature.
+    if provider is None:
+        provider = "ollama"
+
     repo_root = _repo_root()
     secrets_file = repo_root / "tests" / "secrets" / "uat.enc.yaml"
 
@@ -212,29 +231,88 @@ def test_uat(name=None):
     if name:
         cargo_cmd.insert(-2, name)  # before the `--`
 
-    if secrets_file.exists():
-        # `sops exec-env` decrypts the file, exports every key as an
-        # env var, then execs the inner command. Failures bubble up
-        # (e.g. SOPS_AGE_KEY_FILE not set, recipient mismatch).
-        print(
-            f"  Using sops-encrypted secrets from "
-            f"{secrets_file.relative_to(repo_root)}"
-        )
-        cmd = ["sops", "exec-env", str(secrets_file), " ".join(cargo_cmd)]
-    else:
-        print(
-            f"  No {secrets_file.relative_to(repo_root)} — falling back "
-            f"to shell env vars (e.g. OLLAMA_API_KEY)"
-        )
-        cmd = cargo_cmd
+    # Map provider name -> env var the tests will check at runtime
+    # to gate on credential presence (`provider_env_var` in
+    # crates/muninn/tests/common/mod.rs).
+    provider_env_keys = {
+        "ollama": "OLLAMA_API_KEY",
+        "groq": "GROQ_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+    }
 
-    try:
-        subprocess.run(cmd, env=os.environ.copy(), check=True)
-        print("UAT tests passed!")
-        return 0
-    except subprocess.CalledProcessError:
-        print("UAT tests failed.")
+    def run_once(provider_name: str) -> int:
+        """Run the cargo command with MUNINN_UAT_PROVIDER set."""
+        env = os.environ.copy()
+        env["MUNINN_UAT_PROVIDER"] = provider_name
+        print(f"\n  ─── UAT pass: provider={provider_name} ───")
+        if secrets_file.exists():
+            # `sops exec-env` decrypts the file, exports every key as
+            # an env var, then execs the inner command. We pass the
+            # already-merged env via MUNINN_UAT_PROVIDER inside the
+            # exec'd shell; sops's exec-env layers its decrypted keys
+            # on top.
+            print(
+                f"  Using sops-encrypted secrets from "
+                f"{secrets_file.relative_to(repo_root)}"
+            )
+            cmd = ["sops", "exec-env", str(secrets_file), " ".join(cargo_cmd)]
+        else:
+            print(
+                f"  No {secrets_file.relative_to(repo_root)} — falling back "
+                f"to shell env vars (e.g. {provider_env_keys.get(provider_name, 'OLLAMA_API_KEY')})"
+            )
+            cmd = cargo_cmd
+        try:
+            subprocess.run(cmd, env=env, check=True)
+            print(f"  UAT pass for provider={provider_name}: OK")
+            return 0
+        except subprocess.CalledProcessError:
+            print(f"  UAT pass for provider={provider_name}: FAILED")
+            return 1
+
+    if provider == "all":
+        # Run once per provider whose API key is actually present.
+        # Decrypt the bundle once to know what's available; if sops
+        # isn't set up, fall back to inspecting the shell env.
+        available = []
+        if secrets_file.exists():
+            try:
+                out = subprocess.run(
+                    ["sops", "-d", str(secrets_file)],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                for p, var in provider_env_keys.items():
+                    if f"{var}:" in out.stdout:
+                        available.append(p)
+            except subprocess.CalledProcessError as e:
+                print(f"  Could not decrypt secrets bundle: {e}")
+                return 1
+        else:
+            for p, var in provider_env_keys.items():
+                if os.environ.get(var):
+                    available.append(p)
+        if not available:
+            print("  No provider credentials available — nothing to run.")
+            return 1
+        print(f"  Providers to exercise: {', '.join(available)}")
+        rc = 0
+        for p in available:
+            rc |= run_once(p)
+        if rc == 0:
+            print("\nAll UAT passes succeeded.")
+        else:
+            print("\nOne or more UAT passes failed.")
+        return rc
+
+    if provider not in provider_env_keys:
+        print(
+            f"  Unknown --provider '{provider}'. "
+            f"Expected one of: {', '.join(provider_env_keys)}, all"
+        )
         return 1
+    return run_once(provider)
 
 
 @test()
@@ -262,8 +340,13 @@ def test_uat(name=None):
     help="Encrypted file under tests/secrets/ (default: uat.enc.yaml)",
     default="uat.enc.yaml",
 )
-def test_secrets_edit(file="uat.enc.yaml"):
+def test_secrets_edit(file=None):
     """Edit a sops-encrypted secrets bundle in place."""
+    # angreal passes None when --file is omitted (the decorator
+    # `default=` doesn't get threaded into the call), so honor the
+    # documented default here rather than at the def-site signature.
+    if file is None:
+        file = "uat.enc.yaml"
     repo_root = _repo_root()
     target = repo_root / "tests" / "secrets" / file
     rel = target.relative_to(repo_root)

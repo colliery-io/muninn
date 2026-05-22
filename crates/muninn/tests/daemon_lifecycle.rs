@@ -18,6 +18,8 @@
 //! Invoke via `angreal test uat`, which decrypts the secrets bundle
 //! and runs all `#[ignore]`'d UAT crates.
 
+mod common;
+
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -92,13 +94,12 @@ fn wait_dead(socket: &std::path::Path, timeout: Duration) {
 
 /// Skip-with-message when credentials aren't around.
 fn skip_if_no_backend(test: &str) -> bool {
-    let has_any = std::env::var_os("OLLAMA_API_KEY").is_some()
-        || std::env::var_os("GROQ_API_KEY").is_some()
-        || std::env::var_os("ANTHROPIC_API_KEY").is_some();
-    if !has_any {
+    if !common::uat_credentials_present() {
+        let p = common::uat_provider();
         eprintln!(
-            "[uat::{test}] skipping: no backend credentials in env — \
-             run via `angreal test uat`"
+            "[uat::{test}] skipping: {} not set for MUNINN_UAT_PROVIDER={p} — \
+             run via `angreal test uat`",
+            common::provider_env_var(&p)
         );
         true
     } else {
