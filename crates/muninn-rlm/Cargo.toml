@@ -44,8 +44,12 @@ base64 = "0.22"
 sha2 = "0.10"
 urlencoding = "2"
 
+# Adapter-neutral engine trait + DTOs (engine boundary lives here).
+muninn-core = { workspace = true }
+
 # Graph
 muninn-graph = { path = "../muninn-graph" }
+muninn-narsil-vendor = { path = "../muninn-narsil-vendor" }
 
 # Tracing
 muninn-tracing = { path = "../muninn-tracing" }

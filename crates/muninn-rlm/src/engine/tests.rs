@@ -188,18 +188,18 @@ async fn test_exploration_metadata() {
 #[test]
 fn test_is_recursive() {
     let request = CompletionRequest::new("model", vec![Message::user("Hi")], 100);
-    assert!(!RecursiveEngine::is_recursive(&request));
+    assert!(!request.is_recursive());
 
     let non_recursive = CompletionRequest::new("model", vec![Message::user("Hi")], 100)
         .with_muninn(MuninnConfig {
             recursive: false,
             ..Default::default()
         });
-    assert!(!RecursiveEngine::is_recursive(&non_recursive));
+    assert!(!non_recursive.is_recursive());
 
     let recursive = CompletionRequest::new("model", vec![Message::user("Hi")], 100)
         .with_muninn(MuninnConfig::recursive());
-    assert!(RecursiveEngine::is_recursive(&recursive));
+    assert!(recursive.is_recursive());
 }
 
 #[test]

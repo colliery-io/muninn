@@ -7,6 +7,7 @@
 mod budget;
 mod context;
 mod dir_tree;
+mod muninn_engine_impl;
 mod tool_executor;
 mod trace;
 
@@ -24,6 +25,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use muninn_core::MuninnEngine;
+
 use crate::backend::LLMBackend;
 use crate::error::Result;
 use crate::fs::{RealFileSystem, SharedFileSystem};
@@ -33,12 +36,56 @@ use crate::types::{
     BudgetConfig, CompletionRequest, CompletionResponse, Message, Role, StopReason, SystemPrompt,
 };
 
+/// Build a default [`MuninnEngine`] from the given backend, tools, and
+/// optional budget/work_dir overrides.
+///
+/// Adapters use this helper to obtain `Arc<dyn MuninnEngine>` without
+/// naming the concrete [`RecursiveEngine`]. Centralizing construction
+/// here keeps the engine-boundary discipline (proxy / MCP server / hook
+/// plugin all depend on the trait, not the impl) honest.
+pub fn default_engine(
+    backend: Arc<dyn LLMBackend>,
+    tools: Arc<dyn ToolEnvironment>,
+    budget: Option<BudgetConfig>,
+    work_dir: Option<PathBuf>,
+) -> Arc<dyn MuninnEngine> {
+    default_engine_with_graph(backend, tools, budget, work_dir, None)
+}
+
+/// Like [`default_engine`], but also wires a shared graph store
+/// through to the engine so the `MuninnEngine::query_graph` trait
+/// method has something to query.
+pub fn default_engine_with_graph(
+    backend: Arc<dyn LLMBackend>,
+    tools: Arc<dyn ToolEnvironment>,
+    budget: Option<BudgetConfig>,
+    work_dir: Option<PathBuf>,
+    graph_store: Option<crate::graph_tools::SharedGraphStore>,
+) -> Arc<dyn MuninnEngine> {
+    let mut deps = EngineDeps::new(backend, tools);
+    if let Some(g) = graph_store {
+        deps = deps.with_graph_store(g);
+    }
+    let mut config = EngineConfig::default();
+    if let Some(b) = budget {
+        config = config.with_budget(b);
+    }
+    if let Some(w) = work_dir {
+        config = config.with_work_dir(w);
+    }
+    Arc::new(RecursiveEngine::new(deps, config))
+}
+
 /// Dependencies for the recursive engine.
 #[derive(Clone)]
 pub struct EngineDeps {
     pub backend: Arc<dyn LLMBackend>,
     pub tools: Arc<dyn ToolEnvironment>,
     pub file_system: Option<SharedFileSystem>,
+    /// Optional shared code graph. When set, the [`MuninnEngine::query_graph`]
+    /// trait method dispatches against it; otherwise the trait
+    /// surfaces a clear "no graph configured" error.
+    pub graph_store: Option<crate::graph_tools::SharedGraphStore>,
 }
 
 impl EngineDeps {
@@ -47,11 +94,17 @@ impl EngineDeps {
             backend,
             tools,
             file_system: None,
+            graph_store: None,
         }
     }
 
     pub fn with_file_system(mut self, fs: SharedFileSystem) -> Self {
         self.file_system = Some(fs);
+        self
+    }
+
+    pub fn with_graph_store(mut self, store: crate::graph_tools::SharedGraphStore) -> Self {
+        self.graph_store = Some(store);
         self
     }
 
@@ -128,10 +181,10 @@ pub struct RecursiveEngine {
     backend: Arc<dyn LLMBackend>,
     tools: Arc<dyn ToolEnvironment>,
     tool_executor: ToolExecutor,
-    #[allow(dead_code)]
-    file_system: SharedFileSystem,
+    pub(crate) file_system: SharedFileSystem,
+    pub(crate) graph_store: Option<crate::graph_tools::SharedGraphStore>,
     default_budget: BudgetConfig,
-    work_dir: Option<PathBuf>,
+    pub(crate) work_dir: Option<PathBuf>,
     #[allow(dead_code)]
     temperature: Option<f32>,
     #[allow(dead_code)]
@@ -147,6 +200,7 @@ impl RecursiveEngine {
             tools: deps.tools,
             tool_executor,
             file_system,
+            graph_store: deps.graph_store,
             default_budget: config.budget,
             work_dir: config.work_dir,
             temperature: config.temperature,
@@ -177,13 +231,13 @@ impl RecursiveEngine {
     pub async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse> {
         let cycle_data = RlmCycleTraceData {
             model: request.model.clone(),
-            is_recursive: Self::is_recursive(&request),
+            is_recursive: request.is_recursive(),
             initial_message_count: request.messages.len(),
             system_prompt: request.system.as_ref().map(|s| s.to_text()),
         };
         muninn_tracing::start_span_with_data("rlm_cycle", &cycle_data);
 
-        let request = if Self::is_recursive(&request) {
+        let request = if request.is_recursive() {
             self.prepare_recursive_request(request)
         } else {
             request
@@ -338,10 +392,6 @@ impl RecursiveEngine {
         };
         muninn_tracing::record_event("rlm_completion", Some(&data));
         muninn_tracing::end_span_ok();
-    }
-
-    pub fn is_recursive(request: &CompletionRequest) -> bool {
-        request.muninn.as_ref().is_some_and(|m| m.recursive)
     }
 
     fn extract_final_pattern(response: &CompletionResponse) -> Option<String> {

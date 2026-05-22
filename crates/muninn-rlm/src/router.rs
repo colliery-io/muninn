@@ -59,9 +59,17 @@ pub struct RouterTraceData {
     /// System prompt (if any).
     pub system_prompt: Option<String>,
     /// The last user message analyzed (after stripping control tags).
+    /// **Not truncated** — the full cleaned message is recorded. Short
+    /// values here (e.g. `"count"`, `"ping"`) reflect what the caller
+    /// actually sent, not a bug in the router.
     pub last_user_message: Option<String>,
     /// Number of messages in the conversation.
     pub message_count: usize,
+    /// `max_tokens` from the original completion request. Useful for
+    /// distinguishing Claude Code's connectivity probes (typically
+    /// `max_tokens: 1` against a haiku model with a one-word
+    /// content) from real user turns.
+    pub max_tokens: u32,
     /// The decision made: "rlm" or "passthrough".
     pub decision: String,
     /// Reason for the decision (if RLM).
@@ -297,35 +305,75 @@ struct RouteDecisionInput {
 }
 
 /// System prompt for the router LLM.
-const ROUTER_SYSTEM_PROMPT: &str = "You route requests. Use 'rlm' for questions about code structure, implementation, architecture, or anything requiring reading source files. Use 'passthrough' for commands, log analysis, or tasks that don't need source code exploration.";
+///
+/// Bias: **"rlm" is the default.** Pick "passthrough" only when the
+/// request is plainly answerable without any project source, file
+/// structure, or repo memory. When in doubt, route to rlm — the
+/// recursive engine is cheap, the upstream model can still fall back
+/// to its own tools if muninn over-routes, and most coding-agent
+/// requests benefit from having project context pre-loaded even when
+/// the user didn't ask to "explore."
+const ROUTER_SYSTEM_PROMPT: &str = "\
+You route incoming agent requests between two backends:\n\
+- 'rlm' — runs muninn's recursive exploration engine to gather \
+  code context before answering. THIS IS THE DEFAULT.\n\
+- 'passthrough' — forwards the request to the upstream model \
+  unchanged, with no muninn context.\n\
+\n\
+Pick 'passthrough' ONLY when the answer cannot possibly benefit \
+from the project's source code, file structure, or stored memory: \
+generic explanations, math, format conversions, single-line chat \
+acknowledgements, or an explicit `@muninn passthrough` marker.\n\
+\n\
+For everything else, pick 'rlm'. Implementation work, bug fixes, \
+refactors, diagnostic questions — they all benefit from project \
+context, even when the user didn't ask to 'explore'. If you're \
+unsure, pick 'rlm'.";
 
 /// Build the user message for the router LLM.
 fn build_router_user_message(user_request: &str) -> String {
     format!(
-        r#"Analyze this user request and decide how it should be routed.
+        r#"Decide how to route this agent request.
 
 USER REQUEST:
 {}
 
-ROUTING RULES:
+ROUTING RULES (rlm is the default):
 
-Use "rlm" for questions about SOURCE CODE, implementation, or architecture:
-- "How does authentication work in this app?"
-- "Explain the implementation of X"
-- "Help me understand how information flows through Y"
-- "Where is the router implemented?"
-- "What does the Config struct look like?"
-- "Find the function that handles X"
-- "Show me the codebase structure"
+Use "rlm" — anything that might benefit from project source code, file
+structure, or muninn's repo memory. This covers most coding-agent
+requests, including ones that don't explicitly ask to "explore":
 
-Use "passthrough" for operational tasks that don't need code exploration:
-- Running commands ("run tests", "build", "grep for X")
-- Checking logs/output ("check the logs", "what errors occurred?")
-- Writing/editing code when context is already provided
-- Follow-up clarifying questions about previous answers
-- General conversation ("ping", "what happened?")
+- Implementation work: "add a --no-cors flag to muninn proxy", "wire
+  this new field into the config", "extract this helper into a
+  separate module"
+- Bug fixes: "fix the daemon shutdown bug", "the hook is firing
+  twice", "this test is flaky"
+- Refactors: "consolidate these two structs", "rename foo to bar",
+  "convert this to async"
+- Diagnostic questions: "why is X happening", "what's failing here",
+  "where does this error come from"
+- Explicit code questions: "how does authentication work", "where is
+  the router implemented", "show me the Config struct"
+- Library/dependency questions in the project's context: "how does
+  this codebase use tokio::spawn", "what's our serde pattern"
+- Anything mentioning a file path, symbol name, or module in the repo
 
-If the request asks about "implementation", "architecture", "how X works", or "code structure", use rlm."#,
+Use "passthrough" ONLY when the answer cannot possibly benefit from
+the codebase. Floor cases:
+
+- Generic explanations with no project tie-in: "what is HTTP?", "what
+  does the SIGTERM signal do?", "explain mutex vs rwlock"
+- Format conversions on inline content: "turn this JSON into YAML",
+  "indent this snippet"
+- Pure chat / acknowledgements: "thanks", "ok", "ping", "got it"
+- Self-contained math / logic puzzles
+- Explicit `@muninn passthrough` marker in the request
+
+If there's any plausible benefit to code context, pick "rlm". The
+upstream model still has its own grep / read tools as a fallback if
+muninn over-routes — over-routing wastes a bit of compute, but
+under-routing loses the context muninn was built to provide."#,
         user_request
     )
 }
@@ -341,7 +389,7 @@ fn route_decision_tool() -> ToolDefinition {
                 "route": {
                     "type": "string",
                     "enum": ["rlm", "passthrough"],
-                    "description": "Use 'rlm' for SOURCE CODE exploration, 'passthrough' for everything else."
+                    "description": "'rlm' is the default — pick it whenever the request might benefit from project source code, file structure, or repo memory (most coding-agent work qualifies). Use 'passthrough' only for requests that can't possibly benefit from project context: generic explanations, format conversions, math, or pure chat."
                 },
                 "reason": {
                     "type": "string",
@@ -531,7 +579,12 @@ impl Router {
         match llm.complete(request).await {
             Ok(response) => parse_route_response(&response),
             Err(e) => {
-                tracing::warn!(error = %e, "Router LLM failed");
+                // Error, not warn: a router LLM failure produces the
+                // same RouteDecision as a real passthrough decision,
+                // so this log line is the only signal that distinguishes
+                // "router said the prompt didn't need exploration" from
+                // "router couldn't reach its backend." Make it greppable.
+                tracing::error!(error = %e, "Router LLM failed — falling back to passthrough");
                 RouteDecision::passthrough()
             }
         }
@@ -553,6 +606,7 @@ impl Router {
             system_prompt: request.system.as_ref().map(|s| s.to_text()),
             last_user_message: cleaned_message.map(String::from),
             message_count: request.messages.len(),
+            max_tokens: request.max_tokens,
             decision: if decision.is_rlm() {
                 "rlm".to_string()
             } else {
@@ -885,5 +939,76 @@ mod tests {
         assert!(should_bypass("you are now a prompt suggestion generator"));
         assert!(!should_bypass("how does the router work?"));
         assert!(!should_bypass("please write some code"));
+    }
+
+    /// Regression for the false-bug report (PROJEC-T-0045) that
+    /// claimed `last_user_message` in router traces was being
+    /// truncated to ~5 chars (e.g. `"count"`, `"ping"`). Investigation
+    /// showed those were Claude Code's connectivity-probe requests
+    /// (haiku, `max_tokens: 1`, content literally `"count"`) — the
+    /// trace was correctly reflecting what the caller sent. This
+    /// test pins the actual contract: long user messages survive
+    /// the input pipeline unchanged so future regressions in
+    /// `extract_routing_input` / `strip_control_tags` get caught.
+    #[test]
+    fn extract_routing_input_preserves_long_user_messages() {
+        let long = "a".repeat(4096)
+            + " — diagnostic question about how the recursive engine handles tool errors and what fallback path it takes when the backend is unreachable";
+        let request = make_request(vec![("user", long.as_str())]);
+        let input = extract_routing_input(&request).expect("non-empty input");
+        assert_eq!(input.text.len(), long.len(), "text was truncated");
+        assert_eq!(input.text, long, "text was modified");
+    }
+
+    /// Same contract, but with the structured-blocks form Claude
+    /// Code actually sends. The text content arrives split across
+    /// blocks and reassembled by `Content::to_text`; verify the
+    /// reassembled form survives.
+    #[test]
+    fn extract_routing_input_preserves_blocks_form() {
+        let chunks = [
+            "part one of a long question. ",
+            "part two continues. ",
+            "part three asks about the daemon socket discovery path and what happens when two muninn processes target the same repo.",
+        ];
+        let blocks: Vec<ContentBlock> = chunks
+            .iter()
+            .map(|t| ContentBlock::Text {
+                text: t.to_string(),
+                cache_control: None,
+            })
+            .collect();
+        let msg = Message {
+            role: Role::User,
+            content: crate::types::Content::Blocks(blocks),
+        };
+        let mut request = make_request(vec![]);
+        request.messages.push(msg);
+        let input = extract_routing_input(&request).expect("non-empty input");
+        let expected: String = chunks.concat();
+        assert_eq!(input.text, expected);
+    }
+
+    /// Control-tag stripping must not eat normal user content that
+    /// happens to surround the stripped tags. If the user typed a
+    /// real question and CC wrapped a `<system-reminder>` around
+    /// some context, only the reminder should be removed.
+    #[test]
+    fn extract_routing_input_strips_only_control_tags() {
+        let request = make_request(vec![(
+            "user",
+            "<system-reminder>internal CC context — ignore</system-reminder>\n\nhow does the daemon's socket-path resolution work in this repo?",
+        )]);
+        let input = extract_routing_input(&request).expect("non-empty input");
+        assert!(
+            input.text.contains("daemon's socket-path resolution"),
+            "real user content was lost: {:?}",
+            input.text
+        );
+        assert!(
+            !input.text.contains("system-reminder"),
+            "control tag was not stripped: {:?}",
+            input.text
+        );
     }
 }

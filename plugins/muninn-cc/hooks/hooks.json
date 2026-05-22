@@ -1,0 +1,17 @@
+{
+  "description": "muninn-cc hooks — UserPromptSubmit drives a router-gated RLM exploration on a local model and injects the answer once per user turn, so Claude doesn't have to discover project context itself.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/user-prompt-submit.sh",
+            "timeout": 245
+          }
+        ]
+      }
+    ]
+  }
+}

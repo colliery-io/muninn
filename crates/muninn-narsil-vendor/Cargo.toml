@@ -1,0 +1,35 @@
+[package]
+name = "muninn-narsil-vendor"
+description = "Vendored subset of narsil-mcp's code-graph extraction (symbols, parser, callgraph, incremental). See NOTICE.md for upstream provenance and licensing."
+version.workspace = true
+# narsil pins edition 2021; keep the vendor crate matching so the
+# code compiles without us hand-porting 2024-edition pattern changes.
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = "1"
+dashmap = "6"
+postcard = { version = "1.1", default-features = false, features = ["use-std"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
+streaming-iterator = "0.1"
+tracing = "0.1"
+
+# Narsil pins tree-sitter 0.26 across the language grammars below.
+# We keep the same versions so the vendored code compiles unchanged.
+tree-sitter = "0.26"
+tree-sitter-rust = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-go = "0.23"
+tree-sitter-c = "0.23"
+tree-sitter-cpp = "0.23"
+tree-sitter-java = "0.23"
+
+[dev-dependencies]
+tempfile = "3"

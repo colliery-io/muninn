@@ -10,16 +10,16 @@
 
 <p align="center">
   <a href="#installation">Installation</a> •
-  <a href="#quick-start">Quick Start</a> •
-  <a href="#how-it-works">How It Works</a> •
-  <a href="#license">License</a>
+  <a href="#using-muninn-with-claude-code-recommended">Quick Start (Claude Code)</a> •
+  <a href="#using-muninn-with-other-clients-proxy">Other Clients</a> •
+  <a href="#how-it-works">How It Works</a>
 </p>
 
 ---
 
 Named for Odin's raven of Memory — Muninn enables AI coding agents to understand large codebases without sacrificing privacy, burning through your token budget, or suffering from session amnesia.
 
-**Built for developers on Claude Pro or Max plans** who want to stretch their token budgets further. Muninn offloads expensive codebase exploration to fast, cheap models (like Groq) so Claude only sees what matters.
+**Built for developers on Claude Pro or Max plans** who want to stretch their token budgets further. Muninn offloads expensive codebase exploration to fast, cheap models so Claude only sees what matters.
 
 ## The Problem
 
@@ -29,98 +29,153 @@ AI coding assistants face a trilemma:
 2. **Privacy matters** — Many developers can't send proprietary code to cloud providers
 3. **Persistent amnesia** — Every session starts fresh, re-learning the codebase from scratch
 
-## The Solution
+## Two integration surfaces
 
-Muninn is a **recursive context gateway** that sits between AI coding agents (like Claude Code) and LLM backends.
+Muninn ships **two ways** to plug into your agent. They share the same engine; pick whichever fits your setup.
 
-**Context tokens become compute, not storage.**
+| Surface | When to use | What it gives you |
+|---|---|---|
+| **Hook + MCP (Claude Code)** | You're using Claude Code (the primary recommendation). | A UserPromptSubmit hook that pre-answers each user prompt via a cheap local model and injects the result, plus an MCP server exposing `search_code` and `query_graph`. Backed by a single local daemon. Sanctioned by CC's own extension points. |
+| **Proxy (everyone else)** | Cursor / Continue / Aider / any OpenAI- or Anthropic-compatible client. | A drop-in HTTP proxy that intercepts requests and routes them through a recursive exploration engine when appropriate. Same engine, different adapter. |
 
-Instead of stuffing millions of tokens into a prompt, Muninn uses Recursive Language Model (RLM) techniques to let the LLM programmatically explore and selectively retrieve only the context that matters.
+See [ADR-0003](.metis/adrs/PROJEC-A-0003.md) for the rationale behind keeping both.
 
 ## Installation
 
-### Quick Install (Linux/macOS)
+### Step 1 — install the binary
 
 ```bash
+# Linux/macOS prebuilt:
 curl -fsSL https://raw.githubusercontent.com/colliery-io/muninn/main/install.sh | bash
-```
 
-### From Source
-
-Requires Rust 1.85+ (nightly):
-
-```bash
+# Or from source (Rust 1.85+, workspace edition 2024):
 git clone https://github.com/colliery-io/muninn.git
 cd muninn
-cargo build --release
+cargo install --path crates/muninn --locked
 ```
 
-### Local Inference with Ollama
+`--locked` is important: it tells cargo to use the committed
+`Cargo.lock` rather than re-resolving dependencies fresh. Without
+it you may pick up newer upstream patch releases than what muninn
+has been tested against (some have published breaking changes
+within a `0.x.y` line).
 
-For fully local inference, Muninn supports [Ollama](https://ollama.ai):
+Verify with `muninn --version`. The installer drops the binary in `~/.local/bin/`; make sure that's on your `PATH`.
+
+### Step 2 — initialize the project
+
+Inside the repo you want muninn to know about:
 
 ```bash
-# Install Ollama, then:
-ollama serve
-ollama pull gpt-oss:20b  # or any model you prefer
+muninn init
 ```
 
-Then configure Muninn to use it:
-```toml
-[rlm]
-provider = "ollama"
-model = "gpt-oss:20b"
-```
+This creates `.muninn/config.toml` with a sensible tiered config (Ollama Cloud + `gemma4:31b` as the default for router and RLM), plus the `.muninn/` directory where muninn keeps its graph index, sessions, and traces. `.muninn/` is per-developer state — keep it gitignored.
 
-## Quick Start
+### Step 3 — provide a backend credential
 
-1. Create a `.muninn/config.toml` in your project:
+The out-of-the-box config talks to Ollama Cloud. Get an [Ollama Cloud](https://ollama.com) API key (free tier works) and put it in your config:
 
 ```toml
-# Router uses a fast model to classify requests
-[router]
-provider = "groq"
-model = "llama-3.1-8b-instant"
-
-# RLM uses a capable model for code exploration
-[rlm]
-provider = "groq"
-model = "qwen/qwen3-32b"
-
-# API keys (or use GROQ_API_KEY / ANTHROPIC_API_KEY env vars)
-[groq]
-api_key = "your-groq-api-key"
-
-# For local inference with Ollama:
-# [rlm]
-# provider = "ollama"
-# model = "gpt-oss:20b"
+# .muninn/config.toml
+[ollama]
+api_key = "..."
 ```
 
-2. Run Claude Code through Muninn:
+You can also export `OLLAMA_API_KEY` in your shell — but be aware: when Claude Code launches muninn's hook + MCP subprocesses, they may not inherit your interactive shell's environment (especially if you started CC from a desktop launcher rather than a terminal). Putting the key in `.muninn/config.toml` is the most reliable path. The same applies to `GROQ_API_KEY` / `ANTHROPIC_API_KEY`.
+
+For Groq, Anthropic direct, or a local Ollama daemon, see [Configuration](#configuration).
+
+That's the binary side done. Now wire it into your agent.
+
+## Using muninn with Claude Code (recommended)
+
+This path uses CC's native hook + MCP extension points. No HTTP intercept, no protocol mimicry — muninn shows up as a regular plugin and a regular MCP server, sharing a single local daemon for both surfaces.
+
+### 1. Register the MCP server
+
+From inside your repo:
 
 ```bash
-muninn claude
+muninn install-cc
 ```
 
-That's it. Muninn starts the proxy, launches Claude Code with the correct configuration, and intelligently routes requests through RLM when codebase exploration is needed.
+This writes a `.mcp.json` at the repo root:
 
-## How It Works
-
+```json
+{
+  "mcpServers": {
+    "muninn": { "command": "muninn", "args": ["mcp"], "env": {} }
+  }
+}
 ```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│ Claude Code │────▶│   Muninn    │────▶│ LLM Backend │
-└─────────────┘     │   (Proxy)   │     └─────────────┘
-                    │             │
-                    │  ┌───────┐  │
-                    │  │Router │  │  "Does this need
-                    │  └───┬───┘  │   code exploration?"
-                    │      │      │
-                    │  ┌───▼───┐  │
-                    │  │  RLM  │  │  Recursive exploration
-                    │  │Engine │  │  with tools (grep, read, etc.)
-                    │  └───────┘  │
-                    └─────────────┘
+
+For a user-wide install (applies to every CC session):
+
+```bash
+muninn install-cc --global
+```
+
+Use `--dry-run` to preview without writing. Roll back with `muninn uninstall-cc [--global]`.
+
+### 2. Install the UserPromptSubmit plugin
+
+Local plugins in Claude Code are loaded with the `--plugin-dir` flag at session start. Restart CC pointing at the plugin source:
+
+```bash
+claude --plugin-dir /absolute/path/to/muninn/plugins/muninn-cc
+```
+
+(Use an absolute path. After the session is running, `/reload-plugins` picks up edits without a restart. There is currently no slash command to add a local plugin to a session that's already started.)
+
+The plugin's UserPromptSubmit hook fires once per user turn: a cheap router model decides whether the prompt needs exploration; if it does, muninn drives its recursive exploration loop on the configured local/cheap backend and injects the result as `additionalContext`, framed as the answer for Claude to deliver. **Failure mode is always silent passthrough** — the hook never blocks the user's turn. See [`plugins/muninn-cc/README.md`](plugins/muninn-cc/README.md).
+
+### 3. (No action needed) the daemon
+
+You don't need to start the daemon explicitly. Both surfaces self-bootstrap:
+
+- `muninn mcp` auto-ensures the daemon when CC connects on session start.
+- The hook script (`user-prompt-submit.sh`) calls `muninn daemon ensure` ahead of `muninn hook submit`, which is a no-op when the daemon is already alive.
+
+Whichever surface fires first that turn starts the daemon; subsequent calls reuse the same socket. If you want to inspect or control it manually: `muninn daemon status` / `muninn daemon ensure` / `muninn daemon stop`.
+
+### Available MCP tools
+
+Once installed, Claude Code can call:
+
+- **`search_code`** — ranked, scoped text/regex matches in the working tree
+- **`query_graph`** — callers / callees / definitions via the code graph
+
+Full schema reference: [`docs/mcp-tools.md`](docs/mcp-tools.md). Other
+context-injection surfaces (dependency docs, persistent memory) are
+explicitly deferred from v1 — muninn v1 is positioned as an
+RLM-driven hook with a minimal explicit-tool surface.
+
+### Optional — index the code graph
+
+`query_graph` returns empty results against a fresh `.muninn/graph.db`. To populate it for this repo:
+
+```bash
+muninn index
+```
+
+The `search_code` MCP tool works without the graph (it walks the filesystem directly). Indexing only unlocks `query_graph`.
+
+## Using muninn with other clients (proxy)
+
+If you're not on Claude Code — Cursor, Continue, Aider, custom scripts hitting OpenAI- or Anthropic-compatible endpoints — muninn's HTTP proxy is the equivalent surface. Same engine, same intelligence; different way of getting requests to it.
+
+### Running the proxy
+
+```bash
+# Start proxy on a specific port (default auto-selects)
+muninn proxy --port 8080
+
+# With verbose logging
+muninn proxy --port 8080 -v
+
+# Force routing strategy
+muninn proxy --port 8080 --router always-passthrough
 ```
 
 ### Routing
@@ -130,47 +185,27 @@ The router decides whether requests need RLM processing or can pass through dire
 - **Passthrough**: Simple commands, log analysis, follow-up questions
 - **RLM**: "How does authentication work?", "Find the router implementation"
 
-Force routing with triggers:
+Force routing with triggers in the prompt:
 - `@muninn explore` — Force RLM exploration
 - `@muninn passthrough` — Force direct passthrough
 
-## Running the Proxy Standalone
+### Direct Claude access via OpenAI-compatible API
 
-While `muninn claude` handles everything automatically, you can also run the proxy standalone:
-
-```bash
-# Start proxy on a specific port
-muninn proxy --port 8080
-
-# With verbose logging
-muninn proxy --port 8080 -v
-
-# With a specific routing strategy
-muninn proxy --port 8080 --router always-passthrough
-```
-
-By default, `--port 0` auto-selects an available port. Specify a port explicitly when you need a predictable address.
-
-## Direct Claude Access (OpenAI-Compatible)
-
-If you have a Claude MAX subscription ($100/month or $200/month), you're paying for flat-rate inference — but that's normally only accessible through Claude Code or claude.ai.
-
-Muninn unlocks your MAX subscription for any OpenAI-compatible tool or library:
+If you have a Claude MAX subscription, the proxy unlocks it for any OpenAI-compatible tool:
 
 ```
 POST /v1/chat/completions
 ```
+
+First, authenticate once with `muninn oauth`, then point your tools at `http://localhost:8080/v1/chat/completions`.
 
 **Why use this?**
 
 - **Flat-rate billing**: Your MAX subscription includes inference costs — no per-token API charges
 - **Use any client**: Connect Cursor, Continue, Aider, or any tool that speaks OpenAI format
 - **No RLM overhead**: Bypass the router entirely for simple, direct Claude access
-- **Your existing tools**: Libraries like LangChain, LlamaIndex, or custom scripts just work
 
-First, authenticate once with `muninn oauth`, then point your tools at `http://localhost:8080/v1/chat/completions`.
-
-### Request Format (OpenAI-style)
+#### Request format (OpenAI-style)
 
 ```json
 {
@@ -196,66 +231,16 @@ First, authenticate once with `muninn oauth`, then point your tools at `http://l
 | `tools` | array | No | Tool definitions (passed through to Claude) |
 | `tool_choice` | object | No | Tool choice configuration |
 
-**Note on Tools**: Tools are fully supported and passed through to Claude. While not required for OAuth validation, any tools you include in your request will work normally.
+Tools are fully supported and passed through to Claude.
 
-### Response Format (Anthropic-style)
+Response is returned in Anthropic's native format (see streaming notes below for SSE).
 
-The response is returned in Anthropic's native format:
-
-```json
-{
-  "id": "msg_01XYZ...",
-  "type": "message",
-  "role": "assistant",
-  "content": [
-    {
-      "type": "text",
-      "text": "Hello! How can I help you today?"
-    }
-  ],
-  "model": "claude-sonnet-4-20250514",
-  "stop_reason": "end_turn",
-  "usage": {
-    "input_tokens": 25,
-    "output_tokens": 15
-  }
-}
-```
-
-When Claude uses tools, the response includes tool use blocks:
-
-```json
-{
-  "id": "msg_01XYZ...",
-  "type": "message",
-  "role": "assistant",
-  "content": [
-    {
-      "type": "tool_use",
-      "id": "toolu_01ABC...",
-      "name": "get_weather",
-      "input": {"location": "San Francisco"}
-    }
-  ],
-  "model": "claude-sonnet-4-20250514",
-  "stop_reason": "tool_use",
-  "usage": {
-    "input_tokens": 50,
-    "output_tokens": 35
-  }
-}
-```
-
-### Example Usage
+#### Example
 
 ```bash
-# First, authenticate with Claude MAX
-muninn oauth
+muninn oauth                      # one-time
+muninn proxy --port 8080          # in a terminal
 
-# Start the proxy on a specific port (default auto-selects a random port)
-muninn proxy --port 8080
-
-# Simple request
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
@@ -263,29 +248,9 @@ curl -X POST http://localhost:8080/v1/chat/completions \
     "messages": [{"role": "user", "content": "Hello!"}],
     "max_tokens": 100
   }'
-
-# Request with tools
-curl -X POST http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "claude-sonnet-4-20250514",
-    "messages": [{"role": "user", "content": "What is the weather in SF?"}],
-    "max_tokens": 1024,
-    "tools": [{
-      "name": "get_weather",
-      "description": "Get weather for a location",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "location": {"type": "string", "description": "City name"}
-        },
-        "required": ["location"]
-      }
-    }]
-  }'
 ```
 
-For streaming responses, set `"stream": true` and the response will be returned as Server-Sent Events (SSE).
+For streaming responses, set `"stream": true` and the response is returned as Server-Sent Events.
 
 ## Configuration
 
@@ -293,13 +258,100 @@ Muninn stores data in `.muninn/` within your project:
 
 ```
 .muninn/
-├── sessions/           # Per-session logs and traces
-│   └── 2026-01-11T17-34-52_a3f2/
-│       ├── muninn.log
-│       ├── traces.jsonl
-│       └── session.json
-└── config.toml         # Optional configuration
+├── config.toml         # tiered config (provider/model)
+├── graph.db            # code graph
+├── docs.db             # indexed library docs
+└── sessions/           # per-session logs and traces
 ```
+
+### Tiered config
+
+`[default]` is the baseline. `[router]` and `[rlm]` each accept optional `provider` / `model` overrides; unset fields inherit from `[default]`. The minimal config is empty — defaults handle the rest.
+
+Worked example tuning for cost/quality:
+
+```toml
+[default]
+provider = "ollama"
+model = "gemma4:31b"
+
+[router]
+# Cheap/fast model for routing decisions. Inherits provider from [default].
+model = "gemma4:9b"
+
+[rlm]
+# Bigger model for deep recursive exploration. Overrides both.
+provider = "anthropic"
+model = "claude-haiku-4-5-20251001"
+
+[anthropic]
+api_key = "sk-..."
+
+[groq]
+api_key = "gsk_..."
+```
+
+Switching providers entirely is one section:
+
+```toml
+[default]
+provider = "groq"
+model = "llama-3.1-8b-instant"
+
+[groq]
+api_key = "gsk_..."
+```
+
+### Local Inference with Ollama
+
+For fully local inference, override the Ollama base URL:
+
+```toml
+[ollama]
+base_url = "http://localhost:11434/v1"
+# Optional: bound network retries. Default 3 × 500ms backoff. Set to 0
+# to fail fast against a flapping or unreachable backend.
+max_retries = 3
+```
+
+```bash
+ollama serve
+ollama pull gemma4:31b
+```
+
+## How It Works
+
+```
+┌──────────────────────┐  UserPromptSubmit  ┌─────────────────────────┐
+│  Claude Code         │ ─────hook────────▶ │ muninn-cc plugin        │
+│                      │     tools/list     │ user-prompt-submit.sh   │
+│                      │ ──────MCP───────┐  └────────────┬────────────┘
+└──────────────────────┘                 │               │ shells out
+                                         │               ▼
+┌──────────────────────┐                 │     ┌──────────────────┐
+│  Cursor / Continue / │                 │     │  muninn          │
+│  Aider / custom      │                 │     │  hook submit     │
+│  OpenAI-compatible   │ ─────HTTP─────▶ │     └────────┬─────────┘
+└──────────────────────┘                 ▼              ▼
+                            ┌──────────────────────────┐
+                            │  muninn daemon           │
+                            │   ┌─────────────────┐    │
+                            │   │ MuninnEngine    │    │
+                            │   │  complete (RLM) │    │
+                            │   │  search_code    │    │
+                            │   │  query_graph    │    │
+                            │   └────────┬────────┘    │
+                            └────────────┼─────────────┘
+                                         ▼
+                            ┌──────────────────────────┐
+                            │  LLM backend             │
+                            │  (Ollama Cloud / Groq /  │
+                            │   Anthropic / local)     │
+                            └──────────────────────────┘
+```
+
+- **Hook + MCP**: once per user turn, a cheap router decides whether muninn should explore; on rlm, the recursive engine runs on the configured local backend and the result is injected as the answer for Claude to deliver.
+- **Proxy**: HTTP intercept routes each chat-completions request through the same engine — same MuninnEngine trait, same daemon, just a different adapter.
 
 ## License
 

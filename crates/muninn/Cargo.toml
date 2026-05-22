@@ -8,7 +8,9 @@ rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
+muninn-core.workspace = true
 muninn-graph.workspace = true
+muninn-narsil-vendor.workspace = true
 muninn-rlm.workspace = true
 muninn-tracing.workspace = true
 tokio.workspace = true
@@ -25,6 +27,9 @@ futures = "0.3"
 regex = "1"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.0", features = ["v4"] }
+dirs = "5"
 
 [dev-dependencies]
 tempfile = "3"
+libc = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls"] }

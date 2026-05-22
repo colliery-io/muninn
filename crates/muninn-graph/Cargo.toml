@@ -8,24 +8,38 @@ rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
+anyhow = "1"
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 
-# Tree-sitter parsing
-tree-sitter = "0.25"
-tree-sitter-rust = "0.24"
-tree-sitter-python = "0.23"
-tree-sitter-c = "0.23"
-tree-sitter-cpp = "0.23"
-streaming-iterator = "0.1"
+# Code-graph extraction — vendored from narsil-mcp.
+# Replaces our previous hand-written tree-sitter extractors and the
+# scip ingest. See crates/muninn-narsil-vendor/NOTICE.md for provenance.
+muninn-narsil-vendor = { path = "../muninn-narsil-vendor" }
 
 # Graph storage
 graphqlite = { version = "0.3", features = ["bundled-extension"] }
+rusqlite = "0.31"  # Same version as graphqlite uses
 
 # File watching
 notify = "6"
 notify-debouncer-mini = "0.4"
 ignore = "0.4"
+
+# HTTP client for registry APIs
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+
+# Archive extraction
+flate2 = "1.0"
+tar = "0.4"
+zip = "2.2"
+
+# Rustdoc JSON parsing
+rustdoc-types = "0.56"
+
+# Async runtime (needed for reqwest)
+tokio.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

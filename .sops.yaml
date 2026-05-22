@@ -1,0 +1,29 @@
+# sops + AGE recipients for committed test secrets.
+#
+# Each developer holds their own AGE keypair locally. Their *public*
+# key (the `age1...` string) is added to the recipient list below;
+# anyone whose pubkey is listed can decrypt every file matched by the
+# `path_regex` rule. The actual API keys live in
+# `tests/secrets/*.enc.yaml`, encrypted to all recipients.
+#
+# Onboarding a new developer (see tests/secrets/README.md):
+#   1. Dev runs:  age-keygen -o ~/.config/sops/age/keys.txt
+#   2. Dev pastes the `age1...` public key from that file into a PR
+#      adding a line under `age:` below.
+#   3. Reviewer merges, then runs:
+#        sops updatekeys tests/secrets/*.enc.yaml
+#      and commits the updated ciphertext.
+#   4. Dev pulls; their key now decrypts every secret file.
+#
+# Rotating a secret (any recipient can do this):
+#   sops edit tests/secrets/uat.enc.yaml
+#   # edit value, save, commit, push
+#
+# Nothing in this file is sensitive — AGE public keys are public by
+# design. Treat it like a list of authorized SSH pubkeys.
+
+creation_rules:
+  - path_regex: tests/secrets/.*\.enc\.(ya?ml|json|toml)$
+    encrypted_regex: ^(.*_KEY|.*_TOKEN|.*_SECRET|.*_PASSWORD)$
+    age:
+      - age1tp700tygysjl2txjrpphsqdangadjkd4vj38a470lvad2hhvee2s7apl7w  # dstorey

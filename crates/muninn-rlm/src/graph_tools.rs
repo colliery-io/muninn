@@ -248,113 +248,6 @@ impl Tool for FindCallersTool {
     }
 }
 
-// ============================================================================
-// FindImplementationsTool
-// ============================================================================
-
-/// Tool for finding implementations of a trait or interface.
-pub struct FindImplementationsTool {
-    store: SharedGraphStore,
-}
-
-impl FindImplementationsTool {
-    /// Create a new find_implementations tool.
-    pub fn new(store: SharedGraphStore) -> Self {
-        Self { store }
-    }
-}
-
-#[async_trait]
-impl Tool for FindImplementationsTool {
-    fn name(&self) -> &str {
-        "find_implementations"
-    }
-
-    fn description(&self) -> &str {
-        "Find all types that implement a given trait or interface."
-    }
-
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "trait_name": {
-                    "type": "string",
-                    "description": "Name of the trait/interface to find implementations for"
-                },
-                "trait_id": {
-                    "type": "string",
-                    "description": "Full ID of the trait node (if known)"
-                }
-            }
-        })
-    }
-
-    async fn execute(&self, params: serde_json::Value) -> Result<ToolResult> {
-        let trait_id = params
-            .get("trait_id")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-
-        let trait_name = params.get("trait_name").and_then(|v| v.as_str());
-
-        let store = lock_store(&self.store)?;
-
-        // Resolve trait ID if only name is provided
-        let target_id = if let Some(id) = trait_id {
-            id
-        } else if let Some(name) = trait_name {
-            // Find trait by name
-            let symbols = store
-                .find_by_name(name)
-                .map_err(|e| RlmError::ToolExecution(format!("Failed to find trait: {}", e)))?;
-
-            if symbols.is_empty() {
-                return Ok(ToolResult::text(format!(
-                    "No trait found with name '{}'",
-                    name
-                )));
-            }
-
-            // Get the first match's ID from the Value::Object
-            extract_id_from_value(&symbols[0])
-                .ok_or_else(|| RlmError::ToolExecution("Could not extract trait ID".to_string()))?
-        } else {
-            return Ok(ToolResult::error(
-                "Must provide either 'trait_name' or 'trait_id'",
-                true,
-            ));
-        };
-
-        // Find implementations
-        let impls = store.find_implementations(&target_id).map_err(|e| {
-            RlmError::ToolExecution(format!("Failed to find implementations: {}", e))
-        })?;
-
-        if impls.is_empty() {
-            return Ok(ToolResult::text(format!(
-                "No implementations found for '{}'",
-                target_id
-            )));
-        }
-
-        // Format results
-        let impl_info: Vec<serde_json::Value> = impls.iter().map(value_to_json).collect();
-
-        let output = serde_json::json!({
-            "trait": target_id,
-            "implementations": impl_info,
-            "count": impl_info.len()
-        });
-
-        let mut result = ToolResult::json(output);
-        result.metadata = ToolMetadata::with_source(&target_id).with_tag("implementations");
-
-        Ok(result)
-    }
-}
-
-// ============================================================================
 // GetSymbolTool
 // ============================================================================
 
@@ -454,6 +347,157 @@ impl Tool for GetSymbolTool {
             true,
         ))
     }
+}
+
+// ============================================================================
+// FindSymbolsTool
+// ============================================================================
+
+// ============================================================================
+// ReadSymbolTool
+// ============================================================================
+
+/// Tool for fetching the source body of a symbol, with scope-aware
+/// extraction (returns the whole function/class block, not a raw N-line
+/// window). Implemented on top of the vendored narsil
+/// `extract::extract_excerpts` with `expand_to_scope = true`.
+pub struct ReadSymbolTool {
+    store: SharedGraphStore,
+}
+
+impl ReadSymbolTool {
+    pub fn new(store: SharedGraphStore) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait]
+impl Tool for ReadSymbolTool {
+    fn name(&self) -> &str {
+        "read_symbol"
+    }
+
+    fn description(&self) -> &str {
+        "Read the full source body of a symbol (function, method, etc.) \
+         by name or id. Returns the complete scope (entire function/class \
+         block), not just a fixed line window. Use this instead of \
+         read_file when you want one symbol — it skips the surrounding \
+         file content and pays only for the relevant lines."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name of the symbol to read"
+                },
+                "id": {
+                    "type": "string",
+                    "description": "Full ID of the symbol node (if known)"
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, params: serde_json::Value) -> Result<ToolResult> {
+        let symbol_id = params.get("id").and_then(|v| v.as_str());
+        let symbol_name = params.get("name").and_then(|v| v.as_str());
+
+        let store = lock_store(&self.store)?;
+
+        // Resolve to a node Value either by id or by name (first match).
+        let node = if let Some(id) = symbol_id {
+            store
+                .get_node(id)
+                .map_err(|e| RlmError::ToolExecution(format!("get_node: {e}")))?
+        } else if let Some(name) = symbol_name {
+            let symbols = store
+                .find_by_name(name)
+                .map_err(|e| RlmError::ToolExecution(format!("find_by_name: {e}")))?;
+            symbols.into_iter().next()
+        } else {
+            return Ok(ToolResult::error(
+                "Must provide either 'name' or 'id'",
+                true,
+            ));
+        };
+
+        let Some(node) = node else {
+            return Ok(ToolResult::text(format!(
+                "No symbol found for {}",
+                symbol_id.or(symbol_name).unwrap_or("(none)")
+            )));
+        };
+
+        // Pull file_path and start_line off the node's properties.
+        let file_path = node_str_property(&node, "file_path");
+        let start_line = node_int_property(&node, "start_line").unwrap_or(1) as usize;
+        let display_name = node_str_property(&node, "name").unwrap_or_default();
+
+        let Some(file_path) = file_path else {
+            return Ok(ToolResult::text(format!(
+                "Symbol '{display_name}' has no file_path — cannot read body"
+            )));
+        };
+
+        let source = std::fs::read_to_string(&file_path)
+            .map_err(|e| RlmError::ToolExecution(format!("read {file_path}: {e}")))?;
+
+        let cfg = muninn_narsil_vendor::extract::ExcerptConfig {
+            // Most function bodies fit comfortably under 200 lines.
+            // Scope expansion handles smaller chunks correctly.
+            max_lines: 200,
+            ..Default::default()
+        };
+        let excerpts =
+            muninn_narsil_vendor::extract::extract_excerpts(&source, &[start_line], &cfg);
+
+        let body = excerpts
+            .into_iter()
+            .next()
+            .map(|e| e.content)
+            .unwrap_or_else(|| "(extract_excerpts returned no excerpt)".to_string());
+
+        let output = serde_json::json!({
+            "name": display_name,
+            "file_path": file_path,
+            "start_line": start_line,
+            "body": body,
+        });
+        let mut result = ToolResult::json(output);
+        result.metadata = ToolMetadata::with_source(&file_path).with_tag("symbol-body");
+        Ok(result)
+    }
+}
+
+/// Pull a string property out of a graphqlite node `Value`. Returns
+/// `None` if the property isn't present or isn't a string.
+fn node_str_property(value: &Value, key: &str) -> Option<String> {
+    if let Value::Object(map) = value {
+        if let Some(Value::Object(props)) = map.get("properties") {
+            if let Some(Value::String(s)) = props.get(key) {
+                return Some(s.clone());
+            }
+        }
+    }
+    None
+}
+
+fn node_int_property(value: &Value, key: &str) -> Option<i64> {
+    if let Value::Object(map) = value {
+        if let Some(Value::Object(props)) = map.get("properties") {
+            match props.get(key) {
+                Some(Value::Integer(i)) => return Some(*i),
+                // start_line is stored as a string after symbol_to_properties
+                // converts via to_string(); parse it back.
+                Some(Value::String(s)) => return s.parse().ok(),
+                _ => {}
+            }
+        }
+    }
+    None
 }
 
 // ============================================================================
@@ -826,135 +870,6 @@ impl Tool for FileOutlineTool {
 }
 
 // ============================================================================
-// FindUsagesTool
-// ============================================================================
-
-/// Tool for finding all usages/references to a symbol.
-pub struct FindUsagesTool {
-    store: SharedGraphStore,
-}
-
-impl FindUsagesTool {
-    /// Create a new find_usages tool.
-    pub fn new(store: SharedGraphStore) -> Self {
-        Self { store }
-    }
-}
-
-#[async_trait]
-impl Tool for FindUsagesTool {
-    fn name(&self) -> &str {
-        "find_usages"
-    }
-
-    fn description(&self) -> &str {
-        "Find all places where a symbol (type, struct, function, etc.) is used or referenced. \
-         More general than find_callers - works for any symbol type. Shows what depends on this symbol."
-    }
-
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "symbol_name": {
-                    "type": "string",
-                    "description": "Name of the symbol to find usages for"
-                },
-                "symbol_id": {
-                    "type": "string",
-                    "description": "Full ID of the symbol node (if known)"
-                }
-            }
-        })
-    }
-
-    async fn execute(&self, params: serde_json::Value) -> Result<ToolResult> {
-        let symbol_id = params
-            .get("symbol_id")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-
-        let symbol_name = params.get("symbol_name").and_then(|v| v.as_str());
-
-        let store = lock_store(&self.store)?;
-
-        // Resolve symbol ID if only name is provided
-        let target_id = if let Some(id) = symbol_id {
-            id
-        } else if let Some(name) = symbol_name {
-            let symbols = store
-                .find_by_name(name)
-                .map_err(|e| RlmError::ToolExecution(format!("Failed to find symbol: {}", e)))?;
-
-            if symbols.is_empty() {
-                return Ok(ToolResult::text(format!(
-                    "No symbol found with name '{}'",
-                    name
-                )));
-            }
-
-            extract_id_from_value(&symbols[0])
-                .ok_or_else(|| RlmError::ToolExecution("Could not extract symbol ID".to_string()))?
-        } else {
-            return Ok(ToolResult::error(
-                "Must provide either 'symbol_name' or 'symbol_id'",
-                true,
-            ));
-        };
-
-        // Query for all incoming relationships (things that reference this symbol)
-        // This includes CALLS, USES_TYPE, REFERENCES, IMPORTS, etc.
-        let cypher = format!(
-            "MATCH (user)-[r]->(target {{id: '{}'}}) RETURN user, type(r) AS relation",
-            graphqlite::escape_string(&target_id)
-        );
-
-        let result = store
-            .query(&cypher)
-            .map_err(|e| RlmError::ToolExecution(format!("Failed to find usages: {}", e)))?;
-
-        if result.is_empty() {
-            return Ok(ToolResult::text(format!(
-                "No usages found for '{}'",
-                target_id
-            )));
-        }
-
-        // Format results, grouping by relationship type
-        let mut usages: Vec<serde_json::Value> = Vec::new();
-        for row in result.iter() {
-            let mut usage = serde_json::Map::new();
-
-            if let Some(user) = row.get_value("user") {
-                let formatted = format_symbol_value(user);
-                if let serde_json::Value::Object(obj) = formatted {
-                    for (k, v) in obj {
-                        usage.insert(k, v);
-                    }
-                }
-            }
-
-            if let Some(rel) = row.get_value("relation") {
-                usage.insert("relationship".to_string(), value_to_json(rel));
-            }
-
-            usages.push(serde_json::Value::Object(usage));
-        }
-
-        let output = serde_json::json!({
-            "symbol": target_id,
-            "usages": usages,
-            "count": usages.len()
-        });
-
-        let mut result = ToolResult::json(output);
-        result.metadata = ToolMetadata::with_source(&target_id).with_tag("usages");
-
-        Ok(result)
-    }
-}
-
-// ============================================================================
 // Helper Functions
 // ============================================================================
 
@@ -1054,10 +969,9 @@ pub fn create_graph_tools(store: SharedGraphStore) -> Vec<Box<dyn Tool>> {
         // Dependency/usage analysis
         Box::new(FindCallersTool::new(store.clone())),
         Box::new(FindCalleesTool::new(store.clone())),
-        Box::new(FindUsagesTool::new(store.clone())),
-        Box::new(FindImplementationsTool::new(store.clone())),
         // Detail lookup
         Box::new(GetSymbolTool::new(store.clone())),
+        Box::new(ReadSymbolTool::new(store.clone())),
         // Raw query as fallback for advanced users
         Box::new(GraphQueryTool::new(store)),
     ]
@@ -1080,6 +994,9 @@ mod tests {
             qualified_name: Some(format!("crate::{}", name)),
             doc_comment: None,
             visibility: Visibility::Public,
+            cyclomatic: None,
+            cognitive: None,
+            call_degree: None,
         }
     }
 
@@ -1100,12 +1017,12 @@ mod tests {
         let trait_id = store.insert_node(&greet_trait).unwrap();
         let person_id = store.insert_node(&person_struct).unwrap();
 
-        // Add relationships
+        // Add relationships. EdgeKind is Calls-only post-cleanup;
+        // the trait + struct nodes stay in the store as plain nodes
+        // so the find_by_name / get_symbol tools still have them.
+        let _ = (&trait_id, &person_id);
         store
             .insert_edge(&Edge::calls(&main_id, &helper_id, CallType::Direct, 5))
-            .unwrap();
-        store
-            .insert_edge(&Edge::implements(&person_id, &trait_id))
             .unwrap();
 
         wrap_store(store)
@@ -1116,16 +1033,15 @@ mod tests {
     fn test_create_graph_tools() {
         let store = setup_test_store();
         let tools = create_graph_tools(store);
-        assert_eq!(tools.len(), 8);
+        assert_eq!(tools.len(), 7);
 
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(names.contains(&"find_symbols"));
         assert!(names.contains(&"file_outline"));
         assert!(names.contains(&"find_callers"));
         assert!(names.contains(&"find_callees"));
-        assert!(names.contains(&"find_usages"));
-        assert!(names.contains(&"find_implementations"));
         assert!(names.contains(&"get_symbol"));
+        assert!(names.contains(&"read_symbol"));
         assert!(names.contains(&"graph_query"));
     }
 
@@ -1197,25 +1113,6 @@ mod tests {
 
         assert!(!result.is_error());
         assert!(result.to_string_content().contains("No function found"));
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn test_find_implementations_tool() {
-        let store = setup_test_store();
-        let tool = FindImplementationsTool::new(store);
-
-        let result = tool
-            .execute(serde_json::json!({
-                "trait_name": "Greet"
-            }))
-            .await
-            .unwrap();
-
-        assert!(!result.is_error());
-        let content = result.to_string_content();
-        // Person implements Greet
-        assert!(content.contains("Person") || content.contains("implementations"));
     }
 
     #[tokio::test]

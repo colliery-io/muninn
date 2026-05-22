@@ -450,6 +450,9 @@ async fn test_graph_tools_integration() {
         qualified_name: Some("crate::handler::process_request".to_string()),
         doc_comment: Some("Handles incoming requests".to_string()),
         visibility: Visibility::Public,
+        cyclomatic: None,
+        cognitive: None,
+        call_degree: None,
     };
     store.insert_node(&test_fn).unwrap();
 

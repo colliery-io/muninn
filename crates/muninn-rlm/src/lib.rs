@@ -10,6 +10,7 @@
 pub mod anthropic;
 pub mod backend;
 pub mod context;
+pub mod doc_tools;
 pub mod engine;
 pub mod error;
 pub mod fs;
@@ -17,7 +18,7 @@ pub mod fs_tools;
 pub mod graph_tools;
 pub mod groq;
 pub mod mcp;
-pub mod memory_tools;
+pub mod mcp_engine_server;
 pub mod oauth;
 pub mod ollama;
 pub mod passthrough;
@@ -40,6 +41,10 @@ pub use backend::{
     StreamEvent, default_format_tool_definitions, default_format_tool_result,
 };
 pub use context::{ContextAggregator, ContextBuilder, ContextItem};
+pub use doc_tools::{
+    IndexCrateTool, IndexPackageTool, ListLibrariesTool, SearchDocsTool, SharedDocStore,
+    create_doc_tools, wrap_doc_store,
+};
 pub use engine::{EngineConfig, EngineDeps, ExplorationContext, RecursiveEngine};
 pub use error::{BudgetExceededError, BudgetType, Result, RlmError};
 pub use fs::{
@@ -50,15 +55,11 @@ pub use fs_tools::{
     create_fs_tools_with_fs,
 };
 pub use graph_tools::{
-    FindCallersTool, FindImplementationsTool, GetSymbolTool, GraphQueryTool, SharedGraphStore,
-    create_graph_tools, wrap_store,
+    FindCallersTool, GetSymbolTool, GraphQueryTool, SharedGraphStore, create_graph_tools,
+    wrap_store,
 };
 pub use groq::{GroqBackend, GroqConfig};
 pub use mcp::{McpServerConfig, RlmServerHandler, run_mcp_server};
-pub use memory_tools::{
-    DeleteMemoryTool, InMemoryStore, ListMemoriesTool, MemoryEntry, MemoryStore, QueryMemoryTool,
-    SearchMemoryTool, SharedMemoryStore, StoreMemoryTool, create_memory_tools,
-};
 pub use oauth::{
     OAuthConfig, OAuthTokens, PkceChallenge, build_authorization_url, exchange_code_for_tokens,
     generate_state, parse_code_state,
@@ -90,3 +91,19 @@ pub use types::{
     ExplorationMetadata, Message, MuninnConfig, Role, StopReason, ToolChoice, ToolDefinition,
     ToolResultBlock, ToolUseBlock, Usage,
 };
+
+/// Local-IPC engine daemon — server, client, and socket-path helpers.
+///
+/// Re-exports `muninn_core::daemon` so adapters consuming `muninn-rlm`
+/// (today: the binary, the proxy) reach the daemon surface without
+/// pulling `muninn-core` into their `Cargo.toml`.
+pub mod daemon {
+    pub use muninn_core::daemon::*;
+}
+
+/// Adapter-neutral engine trait + handle type.
+///
+/// Re-exported from `muninn-core` so muninn-rlm consumers can hold
+/// `Arc<dyn MuninnEngine>` (aliased as `SharedEngine`) without naming
+/// the upstream crate directly.
+pub use muninn_core::{MuninnEngine, SharedEngine};

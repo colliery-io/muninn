@@ -1,0 +1,16 @@
+{
+  "name": "muninn-cc",
+  "version": "0.0.1",
+  "description": "Pre-answer each user prompt with muninn's recursive exploration on a cheap local model. UserPromptSubmit hook routes the prompt through a local muninn daemon: a cheap router decides whether exploration is needed, and on rlm the recursive engine produces a complete answer that is injected as additionalContext for Claude to deliver. Silent passthrough on any failure.",
+  "author": {
+    "name": "muninn"
+  },
+  "repository": "https://github.com/colliery-io/muninn",
+  "license": "Apache-2.0",
+  "keywords": [
+    "muninn",
+    "context",
+    "rlm",
+    "claude-code"
+  ]
+}

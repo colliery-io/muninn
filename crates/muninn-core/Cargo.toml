@@ -1,0 +1,35 @@
+[package]
+name = "muninn-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Adapter-neutral engine trait and DTOs shared by muninn's proxy, MCP server, and Claude Code hook plugin."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = "0.1"
+thiserror = { workspace = true }
+# Used by the moved LLM types in `llm.rs` for debug-trace logging.
+tracing = { workspace = true }
+# JSON Schema generation for the MCP tool surface. Kept here so the
+# schemas can be derived from the same Rust types they describe.
+schemars = "0.8"
+# Daemon server + client over Unix sockets. Subset of features kept
+# small on purpose; downstream crates pull more as needed.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "macros", "time", "fs"] }
+# Stable hash for the repo-scoped socket path.
+sha2 = "0.10"
+# Path expansion for $XDG_RUNTIME_DIR / $TMPDIR discovery.
+dirs = "5"
+# POSIX `kill(2)` for `daemon stop`. Pulled in only for the Unix-only
+# daemon path; no MSVC-side code uses it.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }
+tempfile = "3"

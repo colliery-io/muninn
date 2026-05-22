@@ -14,6 +14,22 @@ use crate::error::{Result, RlmError};
 use crate::fs::{RealFileSystem, SharedFileSystem};
 use crate::tools::{Tool, ToolMetadata, ToolResult};
 
+/// Map a language tag (e.g. `"rust"`) to a typical filename glob
+/// (`"*.rs"`). Returns `None` for languages we don't have a
+/// convention for; callers should treat that as "no filter."
+fn language_to_glob(lang: Option<&str>) -> Option<&'static str> {
+    match lang? {
+        "rust" => Some("*.rs"),
+        "python" => Some("*.py"),
+        "typescript" => Some("*.ts"),
+        "javascript" => Some("*.js"),
+        "go" => Some("*.go"),
+        "c" => Some("*.c"),
+        "cpp" | "c++" => Some("*.cpp"),
+        _ => None,
+    }
+}
+
 // ============================================================================
 // ReadFileTool
 // ============================================================================
@@ -785,6 +801,74 @@ impl SearchFilesTool {
         }
 
         Ok(())
+    }
+
+    /// Public wrapper: search the working tree for a [`muninn_core::types::SearchQuery`]
+    /// and return a [`muninn_core::types::SearchResult`]. This is the
+    /// glue used by the [`muninn_core::MuninnEngine::search_code`]
+    /// trait implementation on [`crate::engine::RecursiveEngine`].
+    ///
+    /// `query.is_regex == false` is treated as a literal substring
+    /// (the pattern is escaped before regex compilation). `path_glob`
+    /// is applied as a filename glob (the existing simple matcher
+    /// supports `**/*.ext` shapes). `language` is honored by mapping
+    /// the language name to a typical file extension when no
+    /// `path_glob` was provided. `limit` overrides `max_results` for
+    /// the call.
+    pub async fn run_search(
+        &self,
+        query: muninn_core::types::SearchQuery,
+    ) -> std::result::Result<muninn_core::types::SearchResult, muninn_core::MuninnCoreError> {
+        use muninn_core::MuninnCoreError;
+        use muninn_core::types::{SearchHit, SearchResult};
+
+        let pattern_src = if query.is_regex {
+            query.pattern.clone()
+        } else {
+            regex::escape(&query.pattern)
+        };
+        let pattern = regex::Regex::new(&pattern_src)
+            .map_err(|e| MuninnCoreError::InvalidRequest(format!("invalid search pattern: {e}")))?;
+
+        let file_pattern: Option<String> = query
+            .path_glob
+            .clone()
+            .or_else(|| language_to_glob(query.language.as_deref()).map(String::from));
+
+        let limit = query.limit.map(|n| n as usize).unwrap_or(self.max_results);
+
+        // Local copy of state so this method stays `&self` and the
+        // walk respects the requested limit.
+        let tool = SearchFilesTool {
+            fs: self.fs.clone(),
+            root: self.root.clone(),
+            max_results: limit,
+            context_lines: 0,
+        };
+        let mut matches: Vec<SearchMatch> = Vec::new();
+        let root = tool.root.clone();
+        tool.search_dir(&root, &pattern, file_pattern.as_deref(), &mut matches)
+            .await
+            .map_err(|e| MuninnCoreError::Internal(format!("search walk: {e}")))?;
+
+        let truncated = matches.len() >= limit;
+        let hits = matches
+            .into_iter()
+            .map(|m| {
+                let snippet = m
+                    .context
+                    .into_iter()
+                    .find(|c| c.is_match)
+                    .map(|c| c.content)
+                    .unwrap_or_default();
+                SearchHit {
+                    path: m.path,
+                    line: m.line_number as u32,
+                    snippet,
+                }
+            })
+            .collect();
+        Ok(SearchResult { hits, truncated })
     }
 
     /// Check if file is likely binary based on extension.

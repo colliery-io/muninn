@@ -7,28 +7,36 @@ use async_trait::async_trait;
 use reqwest::{Client, header};
 use std::time::Duration;
 
-use crate::backend::{LLMBackend, ResponseStream, StreamEvent, with_retry};
+use crate::backend::{LLMBackend, ResponseStream, StreamEvent, pick_model, with_retry};
 use crate::error::{Result, RlmError};
 use crate::types::{
     CompletionRequest, CompletionResponse, ContentBlock, Role, StopReason, ToolResultContent, Usage,
 };
 
-/// Default Ollama API base URL.
+/// Default Ollama API base URL (local).
 const DEFAULT_API_BASE: &str = "http://localhost:11434/v1";
 
 /// Default timeout for requests (longer for local inference).
 const DEFAULT_TIMEOUT_SECS: u64 = 600;
 
-/// Default model for Ollama backend.
-const DEFAULT_MODEL: &str = "gpt-oss:20b";
+/// Default model for Ollama backend. Picked as muninn's tiered-config baseline
+/// (single mid-size model serving both router and RLM on free-tier Ollama Cloud).
+const DEFAULT_MODEL: &str = "gemma4:31b";
 
 /// Configuration for the Ollama backend.
 #[derive(Debug, Clone)]
 pub struct OllamaConfig {
-    /// Base URL for the API.
+    /// Base URL for the API. Defaults to local Ollama; set to
+    /// `https://ollama.com/v1` for Ollama Cloud.
     pub base_url: String,
 
-    /// Model to use for completions (overrides request model).
+    /// API key. Required when targeting Ollama Cloud; unused for local.
+    pub api_key: Option<String>,
+
+    /// Default model used when the per-request `CompletionRequest.model`
+    /// is empty. A non-empty `request.model` always wins; this lets a
+    /// single configured backend serve callers that pin a model (RLM /
+    /// router tier overrides) and callers that don't.
     pub model: String,
 
     /// Request timeout.
@@ -45,6 +53,7 @@ impl Default for OllamaConfig {
     fn default() -> Self {
         Self {
             base_url: DEFAULT_API_BASE.to_string(),
+            api_key: None,
             model: DEFAULT_MODEL.to_string(),
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             max_retries: 3,
@@ -82,6 +91,24 @@ impl OllamaConfig {
         self.max_retries = retries;
         self
     }
+
+    /// Set the API key (required for Ollama Cloud).
+    pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
+        self.api_key = Some(api_key.into());
+        self
+    }
+
+    /// Configuration preset for Ollama Cloud.
+    pub fn cloud(api_key: impl Into<String>) -> Self {
+        Self::new()
+            .with_base_url("https://ollama.com/v1")
+            .with_api_key(api_key)
+    }
+
+    /// Configuration preset for local Ollama.
+    pub fn local() -> Self {
+        Self::new().with_base_url(DEFAULT_API_BASE)
+    }
 }
 
 /// Ollama API backend.
@@ -108,7 +135,12 @@ impl OllamaBackend {
 
     /// Add headers to a request.
     fn add_headers(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        builder.header(header::CONTENT_TYPE, "application/json")
+        let builder = builder.header(header::CONTENT_TYPE, "application/json");
+        if let Some(key) = self.config.api_key.as_deref() {
+            builder.header(header::AUTHORIZATION, format!("Bearer {}", key))
+        } else {
+            builder
+        }
     }
 
     /// Convert our CompletionRequest to Ollama's OpenAI-compatible format.
@@ -242,7 +274,7 @@ impl OllamaBackend {
         };
 
         OllamaChatRequest {
-            model: self.config.model.clone(),
+            model: pick_model(&request.model, &self.config.model),
             messages,
             max_tokens: Some(request.max_tokens),
             temperature: request.temperature,
@@ -491,7 +523,8 @@ mod tests {
     fn test_config_defaults() {
         let config = OllamaConfig::new();
         assert_eq!(config.base_url, "http://localhost:11434/v1");
-        assert_eq!(config.model, "gpt-oss:20b");
+        assert_eq!(config.model, "gemma4:31b");
+        assert!(config.api_key.is_none());
     }
 
     #[test]
@@ -502,5 +535,19 @@ mod tests {
 
         assert_eq!(config.model, "qwen2.5-coder:7b");
         assert_eq!(config.base_url, "http://192.168.1.100:11434/v1");
+    }
+
+    #[test]
+    fn test_cloud_preset() {
+        let config = OllamaConfig::cloud("secret-key");
+        assert_eq!(config.base_url, "https://ollama.com/v1");
+        assert_eq!(config.api_key.as_deref(), Some("secret-key"));
+    }
+
+    #[test]
+    fn test_local_preset_keyless() {
+        let config = OllamaConfig::local();
+        assert_eq!(config.base_url, "http://localhost:11434/v1");
+        assert!(config.api_key.is_none());
     }
 }
