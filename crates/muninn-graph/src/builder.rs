@@ -74,6 +74,65 @@ impl GraphBuilder {
         }
     }
 
+    /// Resolve a call's `callee` expression to a node id.
+    ///
+    /// Layered lookup: first the current file's local symbol map
+    /// (exact match, then short-name fallback after stripping the
+    /// scope qualifier), then a workspace-wide lookup against the
+    /// store via `find_by_name`. The workspace step is what catches
+    /// cross-file and cross-crate calls — at full-rebuild time the
+    /// second pass of `build_directory` sees a fully-populated
+    /// store so these lookups succeed; the watcher's incremental
+    /// path benefits too when the target lives in an already-indexed
+    /// file. Returns `None` if no resolution succeeded; the caller
+    /// decides whether to emit an unresolved placeholder (which
+    /// graphqlite then drops on insert).
+    fn resolve_callee_id(
+        &self,
+        callee: &str,
+        local_callables: &std::collections::HashMap<&str, &Symbol>,
+        scope_separator: char,
+    ) -> Option<String> {
+        // 1. Local exact match.
+        if let Some(s) = local_callables.get(callee) {
+            return Some(s.id());
+        }
+        // 2. Short-name local match (e.g. `foo::bar::baz` -> `baz`).
+        let short = callee.rsplit(scope_separator).next().unwrap_or(callee);
+        if let Some(s) = local_callables.get(short) {
+            return Some(s.id());
+        }
+        // 3. Workspace lookup via the store. Iterate matches and
+        //    prefer callable kinds; first match wins.
+        if let Ok(candidates) = self.store.find_by_name(short) {
+            for c in &candidates {
+                if let Some(id) = extract_node_id(c) {
+                    return Some(id);
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Extract the `id` property out of a graphqlite node `Value`.
+/// graphqlite represents nodes as `Object({ "properties": Object({ "id": String, ... }) })`.
+/// Returns `None` if the shape doesn't match (defensive — should always match for store-returned values).
+fn extract_node_id(value: &graphqlite::Value) -> Option<String> {
+    if let graphqlite::Value::Object(map) = value {
+        if let Some(graphqlite::Value::Object(props)) = map.get("properties") {
+            if let Some(graphqlite::Value::String(id)) = props.get("id") {
+                return Some(id.clone());
+            }
+        }
+        if let Some(graphqlite::Value::String(id)) = map.get("id") {
+            return Some(id.clone());
+        }
+    }
+    None
+}
+
+impl GraphBuilder {
     /// Parse and add a single file to the graph.
     ///
     /// Extracts symbols and relationships from the file and stores them.
@@ -130,7 +189,26 @@ impl GraphBuilder {
     pub fn build_directory(&mut self, path: &Path) -> Result<BuildStats> {
         let mut stats = BuildStats::default();
 
+        // First pass: parse every file, insert its nodes and any
+        // intra-file edges. Cross-file calls miss resolution on
+        // this pass and are dropped (graphqlite drops edges whose
+        // target node doesn't exist).
         self.build_directory_recursive(path, &mut stats)?;
+
+        // Second pass: re-walk with all nodes now present in the
+        // store. The store-based fallback inside the per-file call
+        // resolver now finds cross-file targets via find_by_name,
+        // so the CALLS edges that previously vanished get inserted.
+        // Node inserts are upserts (idempotent) so the second pass
+        // doesn't duplicate symbols.
+        //
+        // We don't double-count stats; this pass adds edges that
+        // were missing, so we track only the delta.
+        let mut second_pass_stats = BuildStats::default();
+        self.build_directory_recursive(path, &mut second_pass_stats)?;
+        stats.edges_added += second_pass_stats
+            .edges_added
+            .saturating_sub(stats.edges_added);
 
         Ok(stats)
     }
@@ -266,13 +344,14 @@ impl GraphBuilder {
             });
 
             if let Some(caller_symbol) = caller {
-                // Try to resolve the callee
-                let target_id = if let Some(target_symbol) = symbol_map.get(call.callee.as_str()) {
-                    target_symbol.id()
-                } else {
-                    // Unresolved call - use a placeholder ID
-                    format!("unresolved__{}", call.callee.replace("::", "__"))
-                };
+                // Try to resolve the callee via the workspace-aware
+                // layered lookup. Falls back to an unresolved
+                // placeholder only when truly nothing matches — and
+                // graphqlite drops those edges on insert, so they
+                // never pollute the graph.
+                let target_id = self
+                    .resolve_callee_id(&call.callee, &symbol_map, ':')
+                    .unwrap_or_else(|| format!("unresolved__{}", call.callee.replace("::", "__")));
 
                 // Determine call type based on is_method flag
                 let call_type = if call.is_method {
@@ -434,11 +513,11 @@ impl GraphBuilder {
             });
 
             if let Some(caller_symbol) = caller {
-                let target_id = if let Some(target_symbol) = symbol_map.get(call.callee.as_str()) {
-                    target_symbol.id()
-                } else {
-                    format!("unresolved__{}", call.callee.replace('.', "__"))
-                };
+                // Workspace-aware resolution (Python uses `.` as
+                // the scope separator, e.g. `module.foo`).
+                let target_id = self
+                    .resolve_callee_id(&call.callee, &symbol_map, '.')
+                    .unwrap_or_else(|| format!("unresolved__{}", call.callee.replace('.', "__")));
 
                 let call_type = if call.is_method {
                     crate::edges::CallType::Method
@@ -630,5 +709,131 @@ pub fn helper() -> Foo {
 
         // Should only process the visible file
         assert_eq!(stats.files_processed, 1, "Should only process visible file");
+    }
+
+    /// Cross-file call resolution: a function defined in one file
+    /// and called from another should produce a real CALLS edge,
+    /// not get dropped as unresolved. Regression test for the
+    /// "graph misses production callers, only shows same-file
+    /// callers" bug surfaced during live UAT.
+    #[test]
+    #[serial]
+    fn test_build_directory_resolves_cross_file_calls() {
+        let store = GraphStore::open_in_memory().expect("Failed to open store");
+        let mut builder = GraphBuilder::new(store);
+
+        let temp_dir = tempdir().expect("Failed to create temp dir");
+
+        // File 1 defines the callee.
+        create_test_rust_file(
+            temp_dir.path(),
+            "defines.rs",
+            r#"
+pub fn the_target_function() -> i32 {
+    42
+}
+"#,
+        );
+
+        // File 2 calls it via a scoped path (the shape of a real
+        // cross-crate call in muninn — e.g. `muninn_rlm::daemon::foo()`).
+        create_test_rust_file(
+            temp_dir.path(),
+            "calls.rs",
+            r#"
+pub fn caller_in_other_file() -> i32 {
+    other_mod::the_target_function()
+}
+"#,
+        );
+
+        builder
+            .build_directory(temp_dir.path())
+            .expect("Build directory should succeed");
+
+        // Find the target node id.
+        let candidates = builder
+            .store()
+            .find_by_name("the_target_function")
+            .expect("find_by_name should succeed");
+        assert!(
+            !candidates.is_empty(),
+            "the_target_function should be in the graph"
+        );
+        let target_id = extract_node_id(&candidates[0]).expect("target should have an id");
+
+        // find_callers should return the caller from the other file.
+        let callers = builder
+            .store()
+            .find_callers(&target_id)
+            .expect("find_callers should succeed");
+        assert!(
+            !callers.is_empty(),
+            "find_callers found 0 callers — cross-file CALLS edge was not persisted. \
+             This is the v1 cross-file resolution bug. Build_directory's two-pass + \
+             workspace-aware lookup should have caught it."
+        );
+        let caller_names: Vec<String> = callers
+            .iter()
+            .filter_map(|v| match v {
+                graphqlite::Value::Object(map) => map.get("properties").and_then(|p| {
+                    if let graphqlite::Value::Object(props) = p {
+                        props.get("name").and_then(|n| {
+                            if let graphqlite::Value::String(s) = n {
+                                Some(s.clone())
+                            } else {
+                                None
+                            }
+                        })
+                    } else {
+                        None
+                    }
+                }),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            caller_names.iter().any(|n| n == "caller_in_other_file"),
+            "expected caller_in_other_file in the caller list; got {caller_names:?}"
+        );
+    }
+
+    /// `resolve_callee_id`'s short-name fallback should turn a
+    /// scoped path like `module::sub::leaf` into a successful
+    /// lookup of `leaf` against the workspace store. Direct unit
+    /// test of the resolver so a future refactor can't silently
+    /// drop the short-name step.
+    #[test]
+    #[serial]
+    fn test_resolve_callee_id_short_name_fallback() {
+        let store = GraphStore::open_in_memory().expect("Failed to open store");
+        let mut builder = GraphBuilder::new(store);
+
+        let temp_dir = tempdir().expect("Failed to create temp dir");
+        create_test_rust_file(
+            temp_dir.path(),
+            "lib.rs",
+            r#"
+pub fn workspace_target() -> i32 {
+    7
+}
+"#,
+        );
+        builder
+            .build_file(&temp_dir.path().join("lib.rs"))
+            .expect("build should succeed");
+
+        // Empty local map — forces fallback into the store.
+        let local: std::collections::HashMap<&str, &Symbol> = std::collections::HashMap::new();
+        let resolved =
+            builder.resolve_callee_id("some_crate::nested::workspace_target", &local, ':');
+        assert!(
+            resolved.is_some(),
+            "scoped-path lookup with workspace store should resolve via short-name fallback"
+        );
+        assert!(
+            resolved.unwrap().contains("workspace_target"),
+            "resolved id should reference the workspace_target node"
+        );
     }
 }
