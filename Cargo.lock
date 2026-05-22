@@ -1458,7 +1458,7 @@ dependencies = [
 
 [[package]]
 name = "muninn"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1487,7 +1487,7 @@ dependencies = [
 
 [[package]]
 name = "muninn-core"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "dirs",
@@ -1504,7 +1504,7 @@ dependencies = [
 
 [[package]]
 name = "muninn-graph"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "flate2",
@@ -1528,7 +1528,7 @@ dependencies = [
 
 [[package]]
 name = "muninn-narsil-vendor"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "dashmap",
@@ -1552,7 +1552,7 @@ dependencies = [
 
 [[package]]
 name = "muninn-rlm"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1590,7 +1590,7 @@ dependencies = [
 
 [[package]]
 name = "muninn-tests"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "muninn-graph",
  "muninn-rlm",
@@ -1602,7 +1602,7 @@ dependencies = [
 
 [[package]]
 name = "muninn-tracing"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "chrono",
  "serde",
