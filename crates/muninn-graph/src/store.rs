@@ -259,20 +259,6 @@ impl GraphStore {
             .collect())
     }
 
-    /// Find implementations of a trait/interface.
-    pub fn find_implementations(&self, trait_id: &str) -> Result<Vec<Value>> {
-        // Use inline property matching for trait node
-        let cypher = format!(
-            "MATCH (impl)-[:IMPLEMENTS]->(t {{id: '{}'}}) RETURN impl",
-            graphqlite::escape_string(trait_id)
-        );
-        let result = self.graph.query(&cypher)?;
-        Ok(result
-            .iter()
-            .filter_map(|r| r.get_value("impl").cloned())
-            .collect())
-    }
-
     /// Find all symbols in a file.
     pub fn find_symbols_in_file(&self, file_path: &str) -> Result<Vec<Value>> {
         // Use inline property matching for file_path
@@ -399,39 +385,19 @@ fn visibility_to_string(vis: &Visibility) -> String {
 /// Convert an EdgeKind to a relationship type.
 fn edge_kind_to_rel_type(kind: &EdgeKind) -> &'static str {
     match kind {
-        EdgeKind::Contains => "_CONTAINS", // Prefixed to avoid Cypher reserved word
-        EdgeKind::Imports { .. } => "IMPORTS",
         EdgeKind::Calls { .. } => "CALLS",
-        EdgeKind::Inherits => "INHERITS",
-        EdgeKind::Implements => "IMPLEMENTS",
-        EdgeKind::UsesType => "USES_TYPE",
-        EdgeKind::Instantiates => "INSTANTIATES",
-        EdgeKind::References => "REFERENCES",
-        EdgeKind::ExpandsTo => "EXPANDS_TO",
-        EdgeKind::GeneratedBy { .. } => "GENERATED_BY",
     }
 }
 
 /// Convert an EdgeKind to property key-value pairs (as strings).
 fn edge_to_properties(kind: &EdgeKind) -> Vec<(&'static str, String)> {
     match kind {
-        EdgeKind::Imports { path, alias } => {
-            let mut props = vec![("import_path", path.clone())];
-            if let Some(a) = alias {
-                props.push(("alias", a.clone()));
-            }
-            props
-        }
         EdgeKind::Calls { call_type, line } => {
             vec![
                 ("call_type", call_type.as_str().to_string()),
                 ("line", line.to_string()),
             ]
         }
-        EdgeKind::GeneratedBy { generator } => {
-            vec![("generator", generator.clone())]
-        }
-        _ => vec![],
     }
 }
 
@@ -590,32 +556,6 @@ mod tests {
 
         let callees = store.find_callees(&main_id).expect("Should find callees");
         assert_eq!(callees.len(), 2);
-    }
-
-    #[test]
-    #[serial]
-    fn test_find_implementations() {
-        let store = GraphStore::open_in_memory().unwrap();
-
-        let trait_sym = create_test_symbol("Greet", SymbolKind::Interface);
-        let impl1 = create_test_symbol("Person", SymbolKind::Struct);
-        let impl2 = create_test_symbol("Robot", SymbolKind::Struct);
-
-        let trait_id = store.insert_node(&trait_sym).unwrap();
-        let impl1_id = store.insert_node(&impl1).unwrap();
-        let impl2_id = store.insert_node(&impl2).unwrap();
-
-        store
-            .insert_edge(&Edge::implements(&impl1_id, &trait_id))
-            .unwrap();
-        store
-            .insert_edge(&Edge::implements(&impl2_id, &trait_id))
-            .unwrap();
-
-        let impls = store
-            .find_implementations(&trait_id)
-            .expect("Should find implementations");
-        assert_eq!(impls.len(), 2);
     }
 
     #[test]
