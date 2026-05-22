@@ -14,6 +14,7 @@ pub mod lang;
 pub mod module_path;
 pub mod parser;
 pub mod registry;
+pub mod scip_ingest;
 pub mod store;
 pub mod symbols;
 pub mod watcher;

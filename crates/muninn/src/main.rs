@@ -198,6 +198,15 @@ enum Commands {
         /// that no longer matches a current source file.
         #[arg(long)]
         reset: bool,
+
+        /// Ingest a pre-built SCIP index (.scip protobuf) instead
+        /// of running muninn's tree-sitter extractors. Produces a
+        /// compiler-grade graph from a real indexer's output —
+        /// e.g. `rust-analyzer scip .` or `scip-python index .`.
+        /// Bypasses tree-sitter parsing entirely. Combine with
+        /// `--reset` for a clean slate.
+        #[arg(long, value_name = "SCIP_FILE")]
+        from_scip: Option<PathBuf>,
     },
 
     /// Initialize a new .muninn directory with config file
@@ -1032,6 +1041,7 @@ async fn main() -> Result<()> {
             output,
             watch,
             reset,
+            from_scip,
         } => {
             // Index uses file logging
             let muninn_dir = config_dir
@@ -1085,6 +1095,19 @@ async fn main() -> Result<()> {
 
             // GraphStore::open creates the database if it doesn't exist
             let store = GraphStore::open(&graph_path)?;
+
+            // SCIP ingest path: skip tree-sitter entirely, load
+            // symbols + occurrences from a pre-built SCIP index.
+            if let Some(scip_file) = from_scip {
+                info!("Ingesting SCIP index from {}", scip_file.display());
+                let stats =
+                    muninn_graph::scip_ingest::ingest_scip(&scip_file, &source_path, &store)?;
+                info!(
+                    "SCIP ingest complete: {} documents, {} symbol nodes, {} call edges",
+                    stats.documents, stats.symbol_nodes, stats.call_edges
+                );
+                return Ok(());
+            }
 
             // Build the index
             let mut builder = GraphBuilder::new(store);
