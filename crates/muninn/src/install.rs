@@ -318,14 +318,16 @@ pub fn describe_uninstall(outcome: &UninstallOutcome, scope: InstallScope) -> St
 }
 
 /// Hook + plugin install notice — printed alongside the MCP summary
-/// because the UserPromptSubmit plugin's local install is done via
-/// CC's own `/plugin` command, which we don't drive from here.
+/// because the UserPromptSubmit plugin lives at the repo root and must
+/// be loaded with `claude --plugin-dir <abs-path>` at session start.
+/// There is no in-session slash command that adds a local plugin source.
 pub fn plugin_install_notice() -> String {
     "Plugin (muninn-cc) install:\n  \
-     The UserPromptSubmit hook plugin at plugins/muninn-cc/ is registered \
-     via Claude Code's `/plugin` command. From a CC session in this repo, run:\n  \
-       /plugin add-source ./plugins/muninn-cc\n  \
-     (Exact incantation depends on your CC version. See plugins/muninn-cc/README.md.)"
+     The UserPromptSubmit hook plugin at plugins/muninn-cc/ is loaded by Claude Code \
+     at session start. Restart CC with:\n  \
+       claude --plugin-dir <absolute-path>/plugins/muninn-cc\n  \
+     (Use an absolute path. `/reload-plugins` inside the session picks up plugin \
+     edits without restarting. See plugins/muninn-cc/README.md for details.)"
         .to_string()
 }
 
