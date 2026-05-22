@@ -2215,9 +2215,27 @@ async fn run_daemon_command(
                 rlm_backend,
                 tools,
                 Some(config_to_rlm_budget(&config.budget)),
-                Some(work_path),
+                Some(work_path.clone()),
                 engine_graph_store,
             );
+
+            // Keep the graph in sync with the source tree while the
+            // daemon is alive. Without this, the graph stays at
+            // whatever state `muninn index` last produced (or the
+            // empty state from `muninn init`), and the RLM's
+            // graph-aware tools — find_callers, find_symbols — drift
+            // out of date the moment a file changes. 1s debounce
+            // batches rapid saves; the watcher uses .gitignore +
+            // the configured extensions to skip noise.
+            if graph_path.exists() {
+                start_file_watcher(graph_path.clone(), work_path.clone(), 1000);
+            } else {
+                tracing::info!(
+                    "graph DB missing at {}; skipping file watcher. Run `muninn index` to bootstrap, \
+                     then restart the daemon to pick up watching.",
+                    graph_path.display()
+                );
+            }
 
             info!("daemon starting at {}", socket_path.display());
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
